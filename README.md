@@ -38,6 +38,8 @@ https://github.com/user-attachments/assets/52980f32-64d6-4b78-9cbf-18d6ae120cdd
   - [`get_diagnostics`](#get_diagnostics)
   - [`restart_server`](#restart_server)
   - [`find_symbol_anywhere`](#find_symbol_anywhere)
+  - [`find_definitions_batch`](#find_definitions_batch)
+  - [`get_symbols_for_file`](#get_symbols_for_file)
 - [💡 Real-world Examples](#-real-world-examples)
   - [Finding Function Definitions](#finding-function-definitions)
   - [Finding All References](#finding-all-references)
@@ -455,6 +457,25 @@ Find a symbol across the entire workspace without specifying a file. Returns mat
 
 - `symbol_name`: The name of the symbol to search for
 - `symbol_kind`: Optional filter by symbol kind (function, class, variable, method, interface, etc.)
+
+### `find_definitions_batch`
+
+Find definitions for multiple symbols in one call. More efficient than calling `find_definition` multiple times.
+
+**Parameters:**
+
+- `items`: Array of symbols to find definitions for. Each item has:
+  - `file_path`: The path to the file
+  - `symbol_name`: The name of the symbol
+  - `symbol_kind`: The kind of symbol (function, class, variable, method, etc.) (optional)
+
+### `get_symbols_for_file`
+
+Return all symbols in a file with their types, positions, and hierarchy. Useful for understanding file structure at a glance.
+
+**Parameters:**
+
+- `file_path`: The path to the file
 
 ## 💡 Real-world Examples
 

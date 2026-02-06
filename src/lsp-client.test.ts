@@ -579,6 +579,216 @@ describe('LSPClient', () => {
     });
   });
 
+  describe('getDocumentSymbols for get_symbols_for_file', () => {
+    it('should return hierarchical DocumentSymbol[] with children', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'MyClass',
+          kind: 5, // Class
+          range: { start: { line: 0, character: 0 }, end: { line: 20, character: 1 } },
+          selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } },
+          children: [
+            {
+              name: 'myMethod',
+              kind: 6, // Method
+              range: { start: { line: 2, character: 2 }, end: { line: 5, character: 3 } },
+              selectionRange: {
+                start: { line: 2, character: 2 },
+                end: { line: 2, character: 10 },
+              },
+            },
+            {
+              name: 'myProperty',
+              kind: 7, // Property
+              range: { start: { line: 1, character: 2 }, end: { line: 1, character: 20 } },
+              selectionRange: {
+                start: { line: 1, character: 2 },
+                end: { line: 1, character: 12 },
+              },
+            },
+          ],
+        },
+        {
+          name: 'helperFunction',
+          kind: 12, // Function
+          range: { start: { line: 22, character: 0 }, end: { line: 25, character: 1 } },
+          selectionRange: {
+            start: { line: 22, character: 9 },
+            end: { line: 22, character: 23 },
+          },
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set(['test.ts']),
+        fileVersions: new Map([['test.ts', 1]]),
+        adapter: undefined,
+      };
+
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      const result = await client.getDocumentSymbols('test.ts');
+
+      expect(result).toEqual(mockSymbols);
+      expect(result).toHaveLength(2);
+      // Verify hierarchical structure is preserved
+      const firstSymbol = result[0] as { children?: unknown[] };
+      expect(firstSymbol.children).toHaveLength(2);
+
+      getServerSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should return flat SymbolInformation[] format', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'myFunction',
+          kind: 12,
+          location: {
+            uri: 'file:///test.ts',
+            range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          },
+          containerName: '',
+        },
+        {
+          name: 'myVariable',
+          kind: 13,
+          location: {
+            uri: 'file:///test.ts',
+            range: { start: { line: 4, character: 0 }, end: { line: 4, character: 20 } },
+          },
+          containerName: 'myFunction',
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set(['test.ts']),
+        fileVersions: new Map([['test.ts', 1]]),
+        adapter: undefined,
+      };
+
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      const result = await client.getDocumentSymbols('test.ts');
+
+      expect(result).toEqual(mockSymbols);
+      expect(result).toHaveLength(2);
+
+      getServerSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+    });
+  });
+
+  describe('Batch definition lookups (find_definitions_batch support)', () => {
+    it('should support multiple findSymbolsByName + findDefinition calls efficiently', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbolsFileA = [
+        {
+          name: 'funcA',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 14 } },
+        },
+      ];
+
+      const mockSymbolsFileB = [
+        {
+          name: 'funcB',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 14 } },
+        },
+      ];
+
+      // Mock getDocumentSymbols to return different symbols per file
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockImplementation(
+        async (filePath: string) => {
+          return filePath === 'a.ts' ? mockSymbolsFileA : mockSymbolsFileB;
+        }
+      );
+
+      // Look up symbols in two different files
+      const resultA = await client.findSymbolsByName('a.ts', 'funcA');
+      const resultB = await client.findSymbolsByName('b.ts', 'funcB');
+
+      expect(resultA.matches).toHaveLength(1);
+      expect(resultA.matches[0]?.name).toBe('funcA');
+      expect(resultB.matches).toHaveLength(1);
+      expect(resultB.matches[0]?.name).toBe('funcB');
+
+      // getDocumentSymbols was called once per file
+      expect(getDocumentSymbolsSpy).toHaveBeenCalledTimes(2);
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+
+    it('should handle mixed results where some symbols are found and others are not', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'existingFunc',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 21 } },
+        },
+      ];
+
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockResolvedValue(
+        mockSymbols
+      );
+
+      // Found
+      const result1 = await client.findSymbolsByName('test.ts', 'existingFunc');
+      expect(result1.matches).toHaveLength(1);
+
+      // Not found
+      const result2 = await client.findSymbolsByName('test.ts', 'nonExistentFunc');
+      expect(result2.matches).toHaveLength(0);
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+  });
+
   describe('Symbol kind fallback functionality', () => {
     it('should return fallback results when specified symbol kind not found', async () => {
       const client = new LSPClient(TEST_CONFIG_PATH);

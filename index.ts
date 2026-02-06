@@ -412,6 +412,54 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['symbol_name'],
         },
       },
+      {
+        name: 'find_definitions_batch',
+        description:
+          'Find definitions for multiple symbols in one call. More efficient than calling find_definition multiple times.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            items: {
+              type: 'array',
+              description: 'Array of symbols to find definitions for',
+              items: {
+                type: 'object',
+                properties: {
+                  file_path: {
+                    type: 'string',
+                    description: 'The path to the file',
+                  },
+                  symbol_name: {
+                    type: 'string',
+                    description: 'The name of the symbol',
+                  },
+                  symbol_kind: {
+                    type: 'string',
+                    description: 'The kind of symbol (function, class, variable, method, etc.)',
+                  },
+                },
+                required: ['file_path', 'symbol_name'],
+              },
+            },
+          },
+          required: ['items'],
+        },
+      },
+      {
+        name: 'get_symbols_for_file',
+        description:
+          'Return all symbols in a file with their types, positions, and hierarchy. Faster than multiple individual symbol lookups.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            file_path: {
+              type: 'string',
+              description: 'The path to the file',
+            },
+          },
+          required: ['file_path'],
+        },
+      },
     ],
   };
 });
@@ -1434,6 +1482,183 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: `Error searching for symbol: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+
+    if (name === 'find_definitions_batch') {
+      const { items } = args as {
+        items: Array<{
+          file_path: string;
+          symbol_name: string;
+          symbol_kind?: string;
+        }>;
+      };
+
+      const results: string[] = [];
+
+      for (const item of items) {
+        const absolutePath = resolve(item.file_path);
+        try {
+          const result = await lspClient.findSymbolsByName(
+            absolutePath,
+            item.symbol_name,
+            item.symbol_kind
+          );
+          const { matches: symbolMatches, warning } = result;
+
+          if (symbolMatches.length === 0) {
+            results.push(
+              `## ${item.symbol_name}${item.symbol_kind ? ` (${item.symbol_kind})` : ''} in ${item.file_path}\nNo symbols found.${warning ? ` ${warning}` : ''}`
+            );
+            continue;
+          }
+
+          for (const match of symbolMatches) {
+            try {
+              const locations = await lspClient.findDefinition(absolutePath, match.position);
+
+              if (locations.length > 0) {
+                const locationResults = locations
+                  .map((loc) => {
+                    const filePath = uriToPath(loc.uri);
+                    const { start } = loc.range;
+                    return `  ${filePath}:${start.line + 1}:${start.character + 1}`;
+                  })
+                  .join('\n');
+
+                results.push(
+                  `## ${match.name} (${lspClient.symbolKindToString(match.kind)}) in ${item.file_path}:${match.position.line + 1}:${match.position.character + 1}${warning ? `\n${warning}` : ''}\n${locationResults}`
+                );
+              }
+            } catch (error) {
+              results.push(
+                `## ${match.name} (${lspClient.symbolKindToString(match.kind)}) in ${item.file_path}\nError: ${error instanceof Error ? error.message : String(error)}`
+              );
+            }
+          }
+        } catch (error) {
+          results.push(
+            `## ${item.symbol_name} in ${item.file_path}\nError: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text:
+              results.length > 0
+                ? results.join('\n\n')
+                : 'No definitions found for any of the requested symbols.',
+          },
+        ],
+      };
+    }
+
+    if (name === 'get_symbols_for_file') {
+      const { file_path } = args as { file_path: string };
+      const absolutePath = resolve(file_path);
+
+      try {
+        const symbols = await lspClient.getDocumentSymbols(absolutePath);
+
+        if (symbols.length === 0) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `No symbols found in ${file_path}. The file may be empty or the language server may not support document symbols.`,
+              },
+            ],
+          };
+        }
+
+        // Check if DocumentSymbol[] (hierarchical) or SymbolInformation[] (flat)
+        const isHierarchical =
+          symbols.length > 0 &&
+          symbols[0] &&
+          'range' in symbols[0] &&
+          'selectionRange' in symbols[0];
+
+        if (isHierarchical) {
+          const formatSymbol = (
+            sym: {
+              name: string;
+              kind: number;
+              detail?: string;
+              range: {
+                start: { line: number; character: number };
+                end: { line: number; character: number };
+              };
+              selectionRange: {
+                start: { line: number; character: number };
+                end: { line: number; character: number };
+              };
+              children?: unknown[];
+            },
+            indent: number
+          ): string => {
+            const prefix = '  '.repeat(indent);
+            const kind = lspClient.symbolKindToString(sym.kind);
+            const { start } = sym.selectionRange;
+            const detail = sym.detail ? ` - ${sym.detail}` : '';
+            let line = `${prefix}• ${sym.name} (${kind}) at line ${start.line + 1}:${start.character + 1}${detail}`;
+
+            if (sym.children && Array.isArray(sym.children)) {
+              for (const child of sym.children) {
+                line += `\n${formatSymbol(child as typeof sym, indent + 1)}`;
+              }
+            }
+
+            return line;
+          };
+
+          const symbolList = symbols.map((sym) =>
+            formatSymbol(sym as Parameters<typeof formatSymbol>[0], 0)
+          );
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Found ${symbols.length} top-level symbol(s) in ${file_path}:\n\n${symbolList.join('\n')}`,
+              },
+            ],
+          };
+        }
+
+        // SymbolInformation[] (flat)
+        const symbolList = symbols.map((sym) => {
+          const s = sym as {
+            name: string;
+            kind: number;
+            location: { uri: string; range: { start: { line: number; character: number } } };
+            containerName?: string;
+          };
+          const kind = lspClient.symbolKindToString(s.kind);
+          const { start } = s.location.range;
+          const container = s.containerName ? ` in ${s.containerName}` : '';
+          return `• ${s.name} (${kind}) at line ${start.line + 1}:${start.character + 1}${container}`;
+        });
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Found ${symbols.length} symbol(s) in ${file_path}:\n\n${symbolList.join('\n')}`,
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error getting symbols: ${error instanceof Error ? error.message : String(error)}`,
             },
           ],
         };
