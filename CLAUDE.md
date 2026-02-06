@@ -46,6 +46,7 @@ npm run prepublishOnly  # build + test + typecheck
 
 - Entry point that implements MCP protocol
 - Exposes `find_definition`, `find_references`, and `rename_symbol` tools
+- Tools that return locations support `include_context` and `context_lines` options for returning source code around results
 - Handles MCP client requests and delegates to LSP layer
 - Includes subcommand handling for `cclsp setup`
 
