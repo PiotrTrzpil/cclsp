@@ -336,6 +336,7 @@ describe('LSPClient', () => {
       expect(result.matches).toHaveLength(1);
       expect(result.matches[0]?.name).toBe('testFunction');
       expect(result.matches[0]?.kind).toBe(12); // Function
+      expect(result.matches[0]?.containerName).toBeUndefined(); // Top-level symbol has no container
       expect(result.warning).toContain('No symbols found with kind "class"');
       expect(result.warning).toContain(
         'Found 1 symbol(s) with name "testFunction" of other kinds: function'
@@ -412,7 +413,60 @@ describe('LSPClient', () => {
 
       expect(result.matches).toHaveLength(1);
       expect(result.matches[0]?.name).toBe('testFunction');
+      expect(result.matches[0]?.containerName).toBeUndefined(); // Top-level symbol
       expect(result.warning).toBeUndefined(); // No warning expected
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+
+    it('should populate containerName for nested symbols in DocumentSymbol hierarchy', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      // Hierarchical DocumentSymbol[] with class containing a method
+      const mockSymbols = [
+        {
+          name: 'MyClass',
+          kind: 5, // Class
+          range: { start: { line: 0, character: 0 }, end: { line: 20, character: 1 } },
+          selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } },
+          children: [
+            {
+              name: 'myMethod',
+              kind: 6, // Method
+              range: { start: { line: 2, character: 2 }, end: { line: 5, character: 3 } },
+              selectionRange: {
+                start: { line: 2, character: 2 },
+                end: { line: 2, character: 10 },
+              },
+            },
+            {
+              name: 'myProp',
+              kind: 7, // Property
+              range: { start: { line: 1, character: 2 }, end: { line: 1, character: 20 } },
+              selectionRange: {
+                start: { line: 1, character: 2 },
+                end: { line: 1, character: 8 },
+              },
+            },
+          ],
+        },
+      ];
+
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockResolvedValue(
+        mockSymbols
+      );
+
+      // Search for 'myMethod' - should have containerName 'MyClass'
+      const result = await client.findSymbolsByName('test.ts', 'myMethod', 'method');
+
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0]?.name).toBe('myMethod');
+      expect(result.matches[0]?.containerName).toBe('MyClass');
+
+      // Search for 'MyClass' - top-level, no container
+      const classResult = await client.findSymbolsByName('test.ts', 'MyClass', 'class');
+      expect(classResult.matches).toHaveLength(1);
+      expect(classResult.matches[0]?.containerName).toBeUndefined();
 
       getDocumentSymbolsSpy.mockRestore();
     });

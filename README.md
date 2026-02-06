@@ -510,8 +510,8 @@ Claude: I'll rename the `data` variable to `userData`
 
 Result: Multiple symbols found matching "data". Please use rename_symbol_strict with one of these positions:
 - data (variable) at line 45, character 10
-- data (parameter) at line 89, character 25
-- data (property) at line 112, character 5
+- data (parameter) in processRequest at line 89, character 25
+- data (property) in ResponseObject at line 112, character 5
 
 > Using cclsp.rename_symbol_strict with line=45, character=10, new_name="userData"
 

@@ -125,6 +125,7 @@ export interface SymbolMatch {
     end: Position;
   };
   detail?: string;
+  containerName?: string;
 }
 
 export enum DiagnosticSeverity {

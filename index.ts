@@ -324,6 +324,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   };
 });
 
+/** Format a symbol match label including container context when available */
+function formatSymbolLabel(symbolName: string, kindStr: string, containerName?: string): string {
+  const container = containerName ? ` in ${containerName}` : '';
+  return `${symbolName} (${kindStr})${container}`;
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
@@ -357,7 +363,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const results = [];
       for (const match of symbolMatches) {
         process.stderr.write(
-          `[DEBUG find_definition] Processing match: ${match.name} (${lspClient.symbolKindToString(match.kind)}) at ${match.position.line}:${match.position.character}\n`
+          `[DEBUG find_definition] Processing match: ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} at ${match.position.line}:${match.position.character}\n`
         );
         try {
           const locations = await lspClient.findDefinition(absolutePath, match.position);
@@ -375,7 +381,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               .join('\n');
 
             results.push(
-              `Results for ${match.name} (${lspClient.symbolKindToString(match.kind)}) at ${file_path}:${match.position.line + 1}:${match.position.character + 1}:\n${locationResults}`
+              `Results for ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} at ${file_path}:${match.position.line + 1}:${match.position.character + 1}:\n${locationResults}`
             );
           } else {
             process.stderr.write(
@@ -466,7 +472,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               .join('\n');
 
             results.push(
-              `Results for ${match.name} (${lspClient.symbolKindToString(match.kind)}) at ${file_path}:${match.position.line + 1}:${match.position.character + 1}:\n${locationResults}`
+              `Results for ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} at ${file_path}:${match.position.line + 1}:${match.position.character + 1}:\n${locationResults}`
             );
           }
         } catch (error) {
@@ -539,7 +545,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const candidatesList = symbolMatches
           .map(
             (match) =>
-              `- ${match.name} (${lspClient.symbolKindToString(match.kind)}) at line ${match.position.line + 1}, character ${match.position.character + 1}`
+              `- ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} at line ${match.position.line + 1}, character ${match.position.character + 1}`
           )
           .join('\n');
 
@@ -594,8 +600,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             const responseText = warning
-              ? `${warning}\n\nSuccessfully renamed ${match.name} (${lspClient.symbolKindToString(match.kind)}) to "${new_name}".\n\nModified files:\n${editResult.filesModified.map((f) => `- ${f}`).join('\n')}`
-              : `Successfully renamed ${match.name} (${lspClient.symbolKindToString(match.kind)}) to "${new_name}".\n\nModified files:\n${editResult.filesModified.map((f) => `- ${f}`).join('\n')}`;
+              ? `${warning}\n\nSuccessfully renamed ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} to "${new_name}".\n\nModified files:\n${editResult.filesModified.map((f) => `- ${f}`).join('\n')}`
+              : `Successfully renamed ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} to "${new_name}".\n\nModified files:\n${editResult.filesModified.map((f) => `- ${f}`).join('\n')}`;
 
             return {
               content: [
@@ -608,8 +614,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           // Dry run mode - show preview
           const responseText = warning
-            ? `${warning}\n\n[DRY RUN] Would rename ${match.name} (${lspClient.symbolKindToString(match.kind)}) to "${new_name}":\n${changes.join('\n')}`
-            : `[DRY RUN] Would rename ${match.name} (${lspClient.symbolKindToString(match.kind)}) to "${new_name}":\n${changes.join('\n')}`;
+            ? `${warning}\n\n[DRY RUN] Would rename ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} to "${new_name}":\n${changes.join('\n')}`
+            : `[DRY RUN] Would rename ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} to "${new_name}":\n${changes.join('\n')}`;
 
           return {
             content: [
@@ -621,8 +627,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         const responseText = warning
-          ? `${warning}\n\nNo rename edits available for ${match.name} (${lspClient.symbolKindToString(match.kind)}). The symbol may not be renameable or the language server doesn't support renaming this type of symbol.`
-          : `No rename edits available for ${match.name} (${lspClient.symbolKindToString(match.kind)}). The symbol may not be renameable or the language server doesn't support renaming this type of symbol.`;
+          ? `${warning}\n\nNo rename edits available for ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)}. The symbol may not be renameable or the language server doesn't support renaming this type of symbol.`
+          : `No rename edits available for ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)}. The symbol may not be renameable or the language server doesn't support renaming this type of symbol.`;
 
         return {
           content: [
