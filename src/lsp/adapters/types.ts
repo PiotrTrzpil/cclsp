@@ -16,6 +16,7 @@ export interface ServerState {
   lastDiagnosticUpdate: Map<string, number>;
   diagnosticVersions: Map<string, number>;
   adapter?: ServerAdapter;
+  serverCapabilities?: Record<string, unknown>;
 }
 
 /**

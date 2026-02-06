@@ -2431,4 +2431,293 @@ describe('LSPClient', () => {
       sendRequestSpy.mockRestore();
     });
   });
+
+  describe('moveFile', () => {
+    const srcFile = join(TEST_DIR, 'move-src.ts');
+    const destFile = join(TEST_DIR, 'move-dest.ts');
+    const destInSubdir = join(TEST_DIR, 'subdir', 'move-dest.ts');
+
+    beforeEach(async () => {
+      await writeFile(srcFile, 'export const x = 1;');
+      // Ensure dest doesn't exist
+      if (existsSync(destFile)) rmSync(destFile);
+      if (existsSync(destInSubdir)) rmSync(destInSubdir, { recursive: true });
+    });
+
+    it('should throw when source file does not exist', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+      (client as any).servers = new Map();
+
+      await expect(client.moveFile('/nonexistent/file.ts', destFile)).rejects.toThrow(
+        'Source file does not exist'
+      );
+    });
+
+    it('should throw when source is a directory', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+      (client as any).servers = new Map();
+
+      await expect(client.moveFile(TEST_DIR, destFile)).rejects.toThrow('Source is a directory');
+    });
+
+    it('should throw when destination already exists', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+      (client as any).servers = new Map();
+
+      // Create dest file
+      writeFileSync(destFile, 'existing');
+
+      await expect(client.moveFile(srcFile, destFile)).rejects.toThrow(
+        'Destination already exists'
+      );
+
+      rmSync(destFile);
+    });
+
+    it('should move file and warn when no servers support willRenameFiles', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockServerState = {
+        process: { stdin: { write: jest.fn() } },
+        config: { extensions: ['ts'], command: ['typescript-language-server', '--stdio'] },
+        initializationPromise: Promise.resolve(),
+        openFiles: new Set<string>(),
+        fileVersions: new Map<string, number>(),
+        symbolCache: new Map(),
+        diagnostics: new Map(),
+        lastDiagnosticUpdate: new Map(),
+        diagnosticVersions: new Map(),
+        serverCapabilities: {}, // No fileOperations support
+      };
+
+      (client as any).servers = new Map([['ts-key', mockServerState]]);
+
+      // Mock getServer + ensureFileOpen for the post-move open
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      const result = await client.moveFile(srcFile, destFile);
+
+      expect(result.moved).toBe(true);
+      expect(result.importChanges).toBeNull();
+      expect(result.warnings.length).toBeGreaterThan(0);
+      expect(result.warnings[0]).toContain('does not support willRenameFiles');
+
+      // Verify file was actually moved
+      expect(existsSync(srcFile)).toBe(false);
+      expect(existsSync(destFile)).toBe(true);
+
+      getServerSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+    });
+
+    it('should return preview in dry run mode without moving file', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockServerState = {
+        process: { stdin: { write: jest.fn() } },
+        config: { extensions: ['ts'], command: ['typescript-language-server', '--stdio'] },
+        initializationPromise: Promise.resolve(),
+        openFiles: new Set<string>(),
+        fileVersions: new Map<string, number>(),
+        symbolCache: new Map(),
+        diagnostics: new Map(),
+        lastDiagnosticUpdate: new Map(),
+        diagnosticVersions: new Map(),
+        serverCapabilities: {
+          workspace: {
+            fileOperations: {
+              willRename: { filters: [{ pattern: { glob: '**/*.ts' } }] },
+            },
+          },
+        },
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['ts-key', mockServerState]]);
+
+      // Mock sendRequest to return a workspace edit
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue({
+        changes: {
+          [pathToUri(join(TEST_DIR, 'other.ts'))]: [
+            {
+              range: { start: { line: 0, character: 20 }, end: { line: 0, character: 35 } },
+              newText: './move-dest',
+            },
+          ],
+        },
+      });
+
+      const result = await client.moveFile(srcFile, destFile, true);
+
+      expect(result.moved).toBe(false);
+      expect(result.importChanges).not.toBeNull();
+      // File should NOT have moved
+      expect(existsSync(srcFile)).toBe(true);
+      expect(existsSync(destFile)).toBe(false);
+
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should move file with import updates from supporting server', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      // Create a file that "imports" the source
+      const importingFile = join(TEST_DIR, 'importer.ts');
+      writeFileSync(importingFile, "import { x } from './move-src';");
+
+      const mockServerState = {
+        process: { stdin: { write: jest.fn() } },
+        config: { extensions: ['ts'], command: ['typescript-language-server', '--stdio'] },
+        initializationPromise: Promise.resolve(),
+        openFiles: new Set<string>([srcFile]),
+        fileVersions: new Map<string, number>([[srcFile, 1]]),
+        symbolCache: new Map(),
+        diagnostics: new Map(),
+        lastDiagnosticUpdate: new Map(),
+        diagnosticVersions: new Map(),
+        serverCapabilities: {
+          workspace: {
+            fileOperations: {
+              willRename: { filters: [{ pattern: { glob: '**/*.ts' } }] },
+              didRename: { filters: [{ pattern: { glob: '**/*.ts' } }] },
+            },
+          },
+        },
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['ts-key', mockServerState]]);
+
+      // Mock sendRequest for willRenameFiles — return edit to update the import
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue({
+        changes: {
+          [pathToUri(importingFile)]: [
+            {
+              range: { start: { line: 0, character: 18 }, end: { line: 0, character: 30 } },
+              newText: "'./move-dest'",
+            },
+          ],
+        },
+      });
+
+      // Mock getServer + ensureFileOpen for the post-move open
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      const result = await client.moveFile(srcFile, destFile);
+
+      expect(result.moved).toBe(true);
+      expect(result.importChanges).not.toBeNull();
+      expect(result.warnings).toHaveLength(0);
+
+      // Verify file was moved
+      expect(existsSync(srcFile)).toBe(false);
+      expect(existsSync(destFile)).toBe(true);
+
+      // Verify old file was removed from server tracking
+      expect(mockServerState.openFiles.has(srcFile)).toBe(false);
+
+      getServerSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+
+      // Clean up
+      rmSync(importingFile);
+    });
+
+    it('should create destination directory if it does not exist', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+      (client as any).servers = new Map();
+
+      // Mock getServer to throw (no server for extension - that's fine)
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockRejectedValue(new Error('no server'));
+
+      const result = await client.moveFile(srcFile, destInSubdir);
+
+      expect(result.moved).toBe(true);
+      expect(existsSync(srcFile)).toBe(false);
+      expect(existsSync(destInSubdir)).toBe(true);
+
+      getServerSpy.mockRestore();
+      rmSync(join(TEST_DIR, 'subdir'), { recursive: true });
+    });
+
+    it('should handle willRenameFiles request failure gracefully', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockServerState = {
+        process: { stdin: { write: jest.fn() } },
+        config: { extensions: ['ts'], command: ['typescript-language-server', '--stdio'] },
+        initializationPromise: Promise.resolve(),
+        openFiles: new Set<string>(),
+        fileVersions: new Map<string, number>(),
+        symbolCache: new Map(),
+        diagnostics: new Map(),
+        lastDiagnosticUpdate: new Map(),
+        diagnosticVersions: new Map(),
+        serverCapabilities: {
+          workspace: {
+            fileOperations: {
+              willRename: { filters: [{ pattern: { glob: '**/*.ts' } }] },
+            },
+          },
+        },
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['ts-key', mockServerState]]);
+
+      // Mock sendRequest to throw
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockRejectedValue(new Error('Server timeout'));
+
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      const result = await client.moveFile(srcFile, destFile);
+
+      // File should still be moved even though willRenameFiles failed
+      expect(result.moved).toBe(true);
+      expect(result.importChanges).toBeNull();
+      expect(result.warnings.length).toBeGreaterThan(0);
+      expect(result.warnings[0]).toContain('Failed to get import updates');
+
+      expect(existsSync(srcFile)).toBe(false);
+      expect(existsSync(destFile)).toBe(true);
+
+      getServerSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+    });
+  });
 });
