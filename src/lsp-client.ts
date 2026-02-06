@@ -1114,13 +1114,16 @@ export class LSPClient {
     return [];
   }
 
-  private flattenDocumentSymbols(symbols: DocumentSymbol[]): DocumentSymbol[] {
-    const flattened: DocumentSymbol[] = [];
+  private flattenDocumentSymbols(
+    symbols: DocumentSymbol[],
+    parentName?: string
+  ): Array<{ symbol: DocumentSymbol; containerName?: string }> {
+    const flattened: Array<{ symbol: DocumentSymbol; containerName?: string }> = [];
 
     for (const symbol of symbols) {
-      flattened.push(symbol);
+      flattened.push({ symbol, containerName: parentName });
       if (symbol.children) {
-        flattened.push(...this.flattenDocumentSymbols(symbol.children));
+        flattened.push(...this.flattenDocumentSymbols(symbol.children, symbol.name));
       }
     }
 
@@ -1328,7 +1331,7 @@ export class LSPClient {
         `[DEBUG findSymbolsByName] Flattened to ${flatSymbols.length} symbols\n`
       );
 
-      for (const symbol of flatSymbols) {
+      for (const { symbol, containerName } of flatSymbols) {
         const nameMatches = symbol.name === symbolName || symbol.name.includes(symbolName);
         const kindMatches =
           !effectiveSymbolKind ||
@@ -1349,6 +1352,7 @@ export class LSPClient {
             position: symbol.selectionRange.start,
             range: symbol.range,
             detail: symbol.detail,
+            containerName,
           });
         }
       }
@@ -1386,6 +1390,7 @@ export class LSPClient {
             position: position,
             range: symbol.location.range,
             detail: undefined, // SymbolInformation doesn't have detail
+            containerName: symbol.containerName,
           });
         }
       }
@@ -1404,7 +1409,7 @@ export class LSPClient {
 
       if (this.isDocumentSymbolArray(symbols)) {
         const flatSymbols = this.flattenDocumentSymbols(symbols);
-        for (const symbol of flatSymbols) {
+        for (const { symbol, containerName } of flatSymbols) {
           const nameMatches = symbol.name === symbolName || symbol.name.includes(symbolName);
           if (nameMatches) {
             fallbackMatches.push({
@@ -1413,6 +1418,7 @@ export class LSPClient {
               position: symbol.selectionRange.start,
               range: symbol.range,
               detail: symbol.detail,
+              containerName,
             });
           }
         }
@@ -1427,6 +1433,7 @@ export class LSPClient {
               position: position,
               range: symbol.location.range,
               detail: undefined,
+              containerName: symbol.containerName,
             });
           }
         }
