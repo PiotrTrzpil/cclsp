@@ -37,6 +37,7 @@ https://github.com/user-attachments/assets/52980f32-64d6-4b78-9cbf-18d6ae120cdd
   - [`rename_symbol_strict`](#rename_symbol_strict)
   - [`get_diagnostics`](#get_diagnostics)
   - [`restart_server`](#restart_server)
+  - [`find_symbol_anywhere`](#find_symbol_anywhere)
 - [💡 Real-world Examples](#-real-world-examples)
   - [Finding Function Definitions](#finding-function-definitions)
   - [Finding All References](#finding-all-references)
@@ -445,6 +446,15 @@ Manually restart LSP servers. Can restart servers for specific file extensions o
 
 **Parameters:**
 - `extensions`: Array of file extensions to restart servers for (e.g., ["ts", "tsx"]). If not provided, all servers will be restarted (optional)
+
+### `find_symbol_anywhere`
+
+Find a symbol across the entire workspace without specifying a file. Returns matching symbols with their locations, types, and containing files. Useful when you know the symbol name but not which file it's in.
+
+**Parameters:**
+
+- `symbol_name`: The name of the symbol to search for
+- `symbol_kind`: Optional filter by symbol kind (function, class, variable, method, interface, etc.)
 
 ## 💡 Real-world Examples
 
