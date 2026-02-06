@@ -627,6 +627,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']),
         fileVersions: new Map([['test.ts', 1]]),
+        symbolCache: new Map(),
         adapter: undefined,
       };
 
@@ -688,6 +689,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']),
         fileVersions: new Map([['test.ts', 1]]),
+        symbolCache: new Map(),
         adapter: undefined,
       };
 

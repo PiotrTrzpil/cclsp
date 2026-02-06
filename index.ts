@@ -1776,7 +1776,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     throw new Error(`Unknown tool: ${name}`);
-  } catch (error) 
+  } catch (error) {
     return {
       content: [
         {
@@ -1785,6 +1785,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         },
       ],
     };
+  }
 });
 
 process.on('SIGINT', () => {
