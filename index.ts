@@ -320,6 +320,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['file_path', 'line', 'character'],
         },
       },
+      {
+        name: 'get_symbol_info',
+        description:
+          'Get comprehensive information about a symbol in one call: definition location, type/documentation from hover, and symbol kind. Combines find_definition + get_hover into a single request.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            file_path: {
+              type: 'string',
+              description: 'The path to the file containing the symbol',
+            },
+            symbol_name: {
+              type: 'string',
+              description: 'The name of the symbol',
+            },
+            symbol_kind: {
+              type: 'string',
+              description: 'The kind of symbol (function, class, variable, method, etc.)',
+            },
+          },
+          required: ['file_path', 'symbol_name'],
+        },
+      },
     ],
   };
 });
@@ -1157,6 +1180,93 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+    }
+
+    if (name === 'get_symbol_info') {
+      const { file_path, symbol_name, symbol_kind } = args as {
+        file_path: string;
+        symbol_name: string;
+        symbol_kind?: string;
+      };
+      const absolutePath = resolve(file_path);
+
+      const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
+      const { matches: symbolMatches, warning } = result;
+
+      if (symbolMatches.length === 0) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `No symbols found with name "${symbol_name}"${symbol_kind ? ` and kind "${symbol_kind}"` : ''} in ${file_path}. Please verify the symbol name and ensure the language server is properly configured.`,
+            },
+          ],
+        };
+      }
+
+      const results = [];
+      for (const match of symbolMatches) {
+        const sections: string[] = [];
+        const kindStr = lspClient.symbolKindToString(match.kind);
+        sections.push(`Symbol: ${match.name} (${kindStr})`);
+        sections.push(
+          `Location: ${file_path}:${match.position.line + 1}:${match.position.character + 1}`
+        );
+
+        if (match.detail) {
+          sections.push(`Detail: ${match.detail}`);
+        }
+
+        // Get definition
+        try {
+          const locations = await lspClient.findDefinition(absolutePath, match.position);
+          if (locations.length > 0) {
+            const defLines = locations.map((loc) => {
+              const filePath = uriToPath(loc.uri);
+              const { start } = loc.range;
+              return `  ${filePath}:${start.line + 1}:${start.character + 1}`;
+            });
+            sections.push(`Definition:\n${defLines.join('\n')}`);
+          }
+        } catch {
+          // Definition lookup failed, skip
+        }
+
+        // Get hover (type info / documentation)
+        try {
+          const hoverResult = await lspClient.hover(absolutePath, match.position);
+          if (hoverResult) {
+            let hoverText: string;
+            if (typeof hoverResult.contents === 'string') {
+              hoverText = hoverResult.contents;
+            } else if (hoverResult.contents && typeof hoverResult.contents === 'object') {
+              hoverText = hoverResult.contents.value || JSON.stringify(hoverResult.contents);
+            } else {
+              hoverText = JSON.stringify(hoverResult.contents);
+            }
+            if (hoverText) {
+              sections.push(`Type/Documentation:\n${hoverText}`);
+            }
+          }
+        } catch {
+          // Hover lookup failed, skip
+        }
+
+        results.push(sections.join('\n'));
+      }
+
+      const responseText = warning
+        ? `${warning}\n\n${results.join('\n\n---\n\n')}`
+        : results.join('\n\n---\n\n');
+
+      return {
+        content: [
+          {
+            type: 'text',
+            text: responseText,
+          },
+        ],
+      };
     }
 
     throw new Error(`Unknown tool: ${name}`);

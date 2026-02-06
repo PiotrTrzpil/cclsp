@@ -37,6 +37,7 @@ https://github.com/user-attachments/assets/52980f32-64d6-4b78-9cbf-18d6ae120cdd
   - [`rename_symbol_strict`](#rename_symbol_strict)
   - [`get_diagnostics`](#get_diagnostics)
   - [`restart_server`](#restart_server)
+  - [`get_symbol_info`](#get_symbol_info)
 - [💡 Real-world Examples](#-real-world-examples)
   - [Finding Function Definitions](#finding-function-definitions)
   - [Finding All References](#finding-all-references)
@@ -441,6 +442,15 @@ Manually restart LSP servers. Can restart servers for specific file extensions o
 
 **Parameters:**
 - `extensions`: Array of file extensions to restart servers for (e.g., ["ts", "tsx"]). If not provided, all servers will be restarted (optional)
+
+### `get_symbol_info`
+
+Get comprehensive information about a symbol in one call: definition location, type/documentation from hover, and symbol kind. Combines `find_definition` + `get_hover` into a single request.
+
+**Parameters:**
+- `file_path`: The path to the file containing the symbol
+- `symbol_name`: The name of the symbol
+- `symbol_kind`: The kind of symbol (function, class, variable, method, etc.) (optional)
 
 ## 💡 Real-world Examples
 
