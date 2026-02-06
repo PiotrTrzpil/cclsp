@@ -10,6 +10,7 @@ type LSPClientInternal = {
   startServer: (config: unknown) => Promise<unknown>;
   getServer: (filePath: string) => Promise<{ initializationPromise: Promise<void> }>;
   ensureFileOpen: (filePath: string) => Promise<void>;
+  ensureAnyFileOpen: (serverState: unknown) => Promise<boolean>;
   sendRequest: (method: string, params: unknown) => Promise<unknown>;
 };
 
@@ -1637,6 +1638,8 @@ describe('LSPClient', () => {
         initializationPromise: Promise.resolve(),
         process: { stdin: { write: jest.fn() } },
         initialized: true,
+        openFiles: new Set(['test.ts']),
+        config: { extensions: ['ts'], command: ['test'] },
         adapter: undefined,
       };
 
@@ -1679,6 +1682,8 @@ describe('LSPClient', () => {
         initializationPromise: Promise.resolve(),
         process: { stdin: { write: jest.fn() } },
         initialized: true,
+        openFiles: new Set(['test.ts']),
+        config: { extensions: ['ts'], command: ['test'] },
         adapter: undefined,
       };
 
@@ -1693,6 +1698,95 @@ describe('LSPClient', () => {
 
       expect(result).toEqual([]);
 
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should open a file first when no files are open (tsserver project context)', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'testFunction',
+          kind: 12,
+          location: {
+            uri: pathToUri('/test.ts'),
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 20 } },
+          },
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set<string>(), // Empty - no files open
+        config: { extensions: ['ts'], command: ['test'] },
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['test-key', mockServerState]]);
+
+      // Mock ensureAnyFileOpen to track that it was called
+      const ensureAnyFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureAnyFileOpen'
+      ).mockResolvedValue(true);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      const result = await client.workspaceSymbol('test');
+
+      expect(result).toEqual(mockSymbols);
+      expect(ensureAnyFileOpenSpy).toHaveBeenCalledTimes(1);
+
+      ensureAnyFileOpenSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should skip opening a file when files are already open', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'testFunction',
+          kind: 12,
+          location: {
+            uri: pathToUri('/test.ts'),
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 20 } },
+          },
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set(['test.ts']), // Has an open file
+        config: { extensions: ['ts'], command: ['test'] },
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['test-key', mockServerState]]);
+
+      const ensureAnyFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureAnyFileOpen'
+      ).mockResolvedValue(true);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      const result = await client.workspaceSymbol('test');
+
+      expect(result).toEqual(mockSymbols);
+      expect(ensureAnyFileOpenSpy).not.toHaveBeenCalled();
+
+      ensureAnyFileOpenSpy.mockRestore();
       sendRequestSpy.mockRestore();
     });
   });
@@ -1732,6 +1826,8 @@ describe('LSPClient', () => {
         initializationPromise: Promise.resolve(),
         process: { stdin: { write: jest.fn() } },
         initialized: true,
+        openFiles: new Set(['test.ts']),
+        config: { extensions: ['ts'], command: ['test'] },
         adapter: undefined,
       };
 
@@ -1790,6 +1886,8 @@ describe('LSPClient', () => {
         initializationPromise: Promise.resolve(),
         process: { stdin: { write: jest.fn() } },
         initialized: true,
+        openFiles: new Set(['test.ts']),
+        config: { extensions: ['ts'], command: ['test'] },
         adapter: undefined,
       };
 
@@ -1839,6 +1937,8 @@ describe('LSPClient', () => {
         initializationPromise: Promise.resolve(),
         process: { stdin: { write: jest.fn() } },
         initialized: true,
+        openFiles: new Set(['test.ts']),
+        config: { extensions: ['ts'], command: ['test'] },
         adapter: undefined,
       };
 

@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { constants, access, readFile } from 'node:fs/promises';
 import { join, normalize, relative } from 'node:path';
 import { loadGitignore, scanDirectoryForExtensions } from './file-scanner.js';
@@ -1694,27 +1694,98 @@ export class LSPClient {
   async workspaceSymbol(query: string): Promise<SymbolInformation[]> {
     process.stderr.write(`[DEBUG workspaceSymbol] Searching for "${query}"\n`);
 
-    // Get any running server to send the request
     const servers = Array.from(this.servers.values());
     if (servers.length === 0) {
       process.stderr.write('[DEBUG workspaceSymbol] No LSP servers running\n');
       return [];
     }
 
-    const serverState = servers[0];
-    if (!serverState) return [];
+    const allSymbols: SymbolInformation[] = [];
 
-    await serverState.initializationPromise;
+    for (const serverState of servers) {
+      if (!serverState) continue;
 
-    const method = 'workspace/symbol';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
-    const result = await this.sendRequest(serverState.process, method, { query }, timeout);
+      await serverState.initializationPromise;
 
-    if (Array.isArray(result)) {
-      return result as SymbolInformation[];
+      // Ensure at least one file is open so the server has a project context
+      // (tsserver requires an open file before workspace/symbol can work)
+      if (serverState.openFiles.size === 0) {
+        const opened = await this.ensureAnyFileOpen(serverState);
+        if (opened) {
+          // Give the server time to index the project
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+      }
+
+      try {
+        const method = 'workspace/symbol';
+        const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+        const result = await this.sendRequest(serverState.process, method, { query }, timeout);
+
+        if (Array.isArray(result)) {
+          allSymbols.push(...(result as SymbolInformation[]));
+        }
+      } catch (error) {
+        process.stderr.write(
+          `[DEBUG workspaceSymbol] Error from server ${serverState.config.command.join(' ')}: ${error}\n`
+        );
+      }
     }
 
-    return [];
+    return allSymbols;
+  }
+
+  /**
+   * Open any file matching the server's configured extensions to establish a project context.
+   * This is needed for workspace-level LSP requests (e.g. workspace/symbol) that require
+   * at least one open file before they can function.
+   */
+  private async ensureAnyFileOpen(serverState: ServerState): Promise<boolean> {
+    const rootDir = serverState.config.rootDir || process.cwd();
+    const extensions = serverState.config.extensions;
+
+    const filePath = this.findFirstFile(rootDir, extensions, 3);
+    if (!filePath) {
+      process.stderr.write(
+        `[DEBUG ensureAnyFileOpen] No matching file found in ${rootDir} for extensions: ${extensions.join(', ')}\n`
+      );
+      return false;
+    }
+
+    process.stderr.write(
+      `[DEBUG ensureAnyFileOpen] Opening ${filePath} to establish project context\n`
+    );
+    await this.ensureFileOpen(serverState, filePath);
+    return true;
+  }
+
+  /**
+   * Find the first file matching any of the given extensions within maxDepth levels.
+   */
+  private findFirstFile(dir: string, extensions: string[], maxDepth: number): string | null {
+    if (maxDepth < 0) return null;
+    try {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      // Check files first (before recursing into subdirs)
+      for (const entry of entries) {
+        if (entry.isFile()) {
+          const ext = entry.name.split('.').pop();
+          if (ext && extensions.includes(ext)) {
+            return join(dir, entry.name);
+          }
+        }
+      }
+      // Then recurse into subdirectories
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          const found = this.findFirstFile(join(dir, entry.name), extensions, maxDepth - 1);
+          if (found) return found;
+        }
+      }
+    } catch {
+      // Directory not readable, skip
+    }
+    return null;
   }
 
   async findImplementation(filePath: string, position: Position): Promise<Location[]> {
