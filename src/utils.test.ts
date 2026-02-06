@@ -1,13 +1,8 @@
-import { describe, expect, it, beforeEach, afterEach } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import {
-  getCodeContext,
-  formatLocationWithContext,
-  pathToUri,
-  uriToPath,
-} from './utils.js';
+import { join } from 'node:path';
+import { formatLocationWithContext, getCodeContext, pathToUri, uriToPath } from './utils.js';
 
 describe('utils', () => {
   describe('pathToUri and uriToPath', () => {
@@ -45,16 +40,16 @@ line 5`;
       const result = getCodeContext(testFile, 2, { linesBefore: 1, linesAfter: 1 });
 
       expect(result).not.toBeNull();
-      expect(result!.lines).toHaveLength(3);
-      expect(result!.lines[0]!.lineNumber).toBe(2);
-      expect(result!.lines[0]!.content).toBe('line 1');
-      expect(result!.lines[0]!.isTargetLine).toBe(false);
-      expect(result!.lines[1]!.lineNumber).toBe(3);
-      expect(result!.lines[1]!.content).toBe('line 2');
-      expect(result!.lines[1]!.isTargetLine).toBe(true);
-      expect(result!.lines[2]!.lineNumber).toBe(4);
-      expect(result!.lines[2]!.content).toBe('line 3');
-      expect(result!.lines[2]!.isTargetLine).toBe(false);
+      expect(result?.lines).toHaveLength(3);
+      expect(result?.lines[0]?.lineNumber).toBe(2);
+      expect(result?.lines[0]?.content).toBe('line 1');
+      expect(result?.lines[0]?.isTargetLine).toBe(false);
+      expect(result?.lines[1]?.lineNumber).toBe(3);
+      expect(result?.lines[1]?.content).toBe('line 2');
+      expect(result?.lines[1]?.isTargetLine).toBe(true);
+      expect(result?.lines[2]?.lineNumber).toBe(4);
+      expect(result?.lines[2]?.content).toBe('line 3');
+      expect(result?.lines[2]?.isTargetLine).toBe(false);
     });
 
     it('should handle first line with context', () => {
@@ -66,10 +61,10 @@ third line`;
       const result = getCodeContext(testFile, 0, { linesBefore: 2, linesAfter: 1 });
 
       expect(result).not.toBeNull();
-      expect(result!.lines).toHaveLength(2);
-      expect(result!.lines[0]!.lineNumber).toBe(1);
-      expect(result!.lines[0]!.isTargetLine).toBe(true);
-      expect(result!.lines[1]!.lineNumber).toBe(2);
+      expect(result?.lines).toHaveLength(2);
+      expect(result?.lines[0]?.lineNumber).toBe(1);
+      expect(result?.lines[0]?.isTargetLine).toBe(true);
+      expect(result?.lines[1]?.lineNumber).toBe(2);
     });
 
     it('should handle last line with context', () => {
@@ -81,10 +76,10 @@ third line`;
       const result = getCodeContext(testFile, 2, { linesBefore: 1, linesAfter: 2 });
 
       expect(result).not.toBeNull();
-      expect(result!.lines).toHaveLength(2);
-      expect(result!.lines[0]!.lineNumber).toBe(2);
-      expect(result!.lines[1]!.lineNumber).toBe(3);
-      expect(result!.lines[1]!.isTargetLine).toBe(true);
+      expect(result?.lines).toHaveLength(2);
+      expect(result?.lines[0]?.lineNumber).toBe(2);
+      expect(result?.lines[1]?.lineNumber).toBe(3);
+      expect(result?.lines[1]?.isTargetLine).toBe(true);
     });
 
     it('should use default context lines', () => {
@@ -100,8 +95,8 @@ third line`;
       const result = getCodeContext(testFile, 3);
 
       expect(result).not.toBeNull();
-      expect(result!.lines).toHaveLength(5); // 2 before + target + 2 after
-      expect(result!.lines[2]!.isTargetLine).toBe(true);
+      expect(result?.lines).toHaveLength(5); // 2 before + target + 2 after
+      expect(result?.lines[2]?.isTargetLine).toBe(true);
     });
 
     it('should return null for non-existent file', () => {
@@ -119,9 +114,9 @@ third line`;
       const result = getCodeContext(testFile, 1, { linesBefore: 1, linesAfter: 1 });
 
       expect(result).not.toBeNull();
-      expect(result!.formatted).toContain('> 2 |   const x = 1;');
-      expect(result!.formatted).toContain('  1 | function foo()');
-      expect(result!.formatted).toContain('  3 |   return x;');
+      expect(result?.formatted).toContain('> 2 |   const x = 1;');
+      expect(result?.formatted).toContain('  1 | function foo()');
+      expect(result?.formatted).toContain('  3 |   return x;');
     });
   });
 
