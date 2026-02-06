@@ -45,7 +45,7 @@ npm run prepublishOnly  # build + test + typecheck
 **MCP Server Layer** (`index.ts`)
 
 - Entry point that implements MCP protocol
-- Exposes `find_definition`, `find_references`, and `rename_symbol` tools
+- Exposes `find_definition`, `find_references`, `rename_symbol`, and `find_symbol_anywhere` tools
 - Handles MCP client requests and delegates to LSP layer
 - Includes subcommand handling for `cclsp setup`
 
