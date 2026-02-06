@@ -40,6 +40,7 @@ https://github.com/user-attachments/assets/52980f32-64d6-4b78-9cbf-18d6ae120cdd
   - [`find_symbol_anywhere`](#find_symbol_anywhere)
   - [`find_definitions_batch`](#find_definitions_batch)
   - [`get_symbols_for_file`](#get_symbols_for_file)
+  - [`get_symbol_info`](#get_symbol_info)
 - [💡 Real-world Examples](#-real-world-examples)
   - [Finding Function Definitions](#finding-function-definitions)
   - [Finding All References](#finding-all-references)
@@ -476,6 +477,15 @@ Return all symbols in a file with their types, positions, and hierarchy. Useful 
 **Parameters:**
 
 - `file_path`: The path to the file
+
+### `get_symbol_info`
+
+Get comprehensive information about a symbol in one call: definition location, type/documentation from hover, and symbol kind. Combines `find_definition` + `get_hover` into a single request.
+
+**Parameters:**
+- `file_path`: The path to the file containing the symbol
+- `symbol_name`: The name of the symbol
+- `symbol_kind`: The kind of symbol (function, class, variable, method, etc.) (optional)
 
 ## 💡 Real-world Examples
 
