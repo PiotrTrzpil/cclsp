@@ -47,7 +47,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'find_definition',
         description:
-          'Find the definition of a symbol by name and kind in a file. Returns definitions for all matching symbols.',
+          'Find the definition of a symbol by name and kind in a file. Returns definitions for all matching symbols, including container context when available.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -70,7 +70,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'find_references',
         description:
-          'Find all references to a symbol across the entire workspace. Returns references for all matching symbols.',
+          'Find all references to a symbol across the entire workspace. Returns references for all matching symbols, including container context when available.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -98,7 +98,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'rename_symbol',
         description:
-          'Rename a symbol by name and kind in a file. If multiple symbols match, returns candidate positions and suggests using rename_symbol_strict. By default, this will apply the rename to the files. Use dry_run to preview changes without applying them.',
+          'Rename a symbol by name and kind in a file. If multiple symbols match, returns candidate positions (with container context) and suggests using rename_symbol_strict. By default, this will apply the rename to the files. Use dry_run to preview changes without applying them.',
         inputSchema: {
           type: 'object',
           properties: {
