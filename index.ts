@@ -47,7 +47,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'find_definition',
         description:
-          'Find the definition of a symbol by name and kind in a file. Returns definitions for all matching symbols.',
+          'Find the definition of a symbol by name and kind in a file. Returns definitions for all matching symbols. Optionally includes source code context around results.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -82,7 +82,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'find_references',
         description:
-          'Find all references to a symbol across the entire workspace. Returns references for all matching symbols.',
+          'Find all references to a symbol across the entire workspace. Returns references for all matching symbols. Optionally includes source code context around results.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -240,7 +240,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'find_workspace_symbols',
         description:
-          'Search for symbols across the entire workspace by name. Returns matching symbols from all files.',
+          'Search for symbols across the entire workspace by name. Returns matching symbols from all files. Optionally includes source code context around results.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -267,7 +267,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'find_implementation',
         description:
-          'Find implementations of an interface or abstract method. Returns locations of all implementations.',
+          'Find implementations of an interface or abstract method. Returns locations of all implementations. Optionally includes source code context around results.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -325,7 +325,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'get_incoming_calls',
         description:
-          'Find all functions/methods that call the function at a position. Requires prepare_call_hierarchy first.',
+          'Find all functions/methods that call the function at a position. Requires prepare_call_hierarchy first. Optionally includes source code context around results.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -360,7 +360,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'get_outgoing_calls',
         description:
-          'Find all functions/methods called by the function at a position. Requires prepare_call_hierarchy first.',
+          'Find all functions/methods called by the function at a position. Requires prepare_call_hierarchy first. Optionally includes source code context around results.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -977,7 +977,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'find_workspace_symbols') {
-      const { query, include_context = false, context_lines = 2 } = args as {
+      const {
+        query,
+        include_context = false,
+        context_lines = 2,
+      } = args as {
         query: string;
         include_context?: boolean;
         context_lines?: number;
@@ -1035,7 +1039,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'find_implementation') {
-      const { file_path, line, character, include_context = false, context_lines = 2 } = args as {
+      const {
+        file_path,
+        line,
+        character,
+        include_context = false,
+        context_lines = 2,
+      } = args as {
         file_path: string;
         line: number;
         character: number;
@@ -1146,7 +1156,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_incoming_calls') {
-      const { file_path, line, character, include_context = false, context_lines = 2 } = args as {
+      const {
+        file_path,
+        line,
+        character,
+        include_context = false,
+        context_lines = 2,
+      } = args as {
         file_path: string;
         line: number;
         character: number;
@@ -1230,7 +1246,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_outgoing_calls') {
-      const { file_path, line, character, include_context = false, context_lines = 2 } = args as {
+      const {
+        file_path,
+        line,
+        character,
+        include_context = false,
+        context_lines = 2,
+      } = args as {
         file_path: string;
         line: number;
         character: number;
