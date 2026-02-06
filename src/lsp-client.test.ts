@@ -306,6 +306,279 @@ describe('LSPClient', () => {
     });
   });
 
+  describe('Symbol caching', () => {
+    it('should cache document symbols and return cached result on second call', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'testFunction',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 21 } },
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set(['test.ts']),
+        fileVersions: new Map([['test.ts', 1]]),
+        symbolCache: new Map(),
+        adapter: undefined,
+      };
+
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      // First call should hit LSP
+      const result1 = await client.getDocumentSymbols('test.ts');
+      expect(result1).toEqual(mockSymbols);
+      expect(sendRequestSpy).toHaveBeenCalledTimes(1);
+
+      // Second call should return cached result
+      const result2 = await client.getDocumentSymbols('test.ts');
+      expect(result2).toEqual(mockSymbols);
+      expect(sendRequestSpy).toHaveBeenCalledTimes(1); // Not called again
+
+      getServerSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should invalidate cache when file version changes', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbolsV1 = [
+        {
+          name: 'oldFunction',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 20 } },
+        },
+      ];
+
+      const mockSymbolsV2 = [
+        {
+          name: 'newFunction',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 20 } },
+        },
+      ];
+
+      const fileVersions = new Map([['test.ts', 1]]);
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set(['test.ts']),
+        fileVersions,
+        symbolCache: new Map(),
+        adapter: undefined,
+      };
+
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      let callCount = 0;
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockImplementation(async () => {
+        callCount++;
+        return callCount === 1 ? mockSymbolsV1 : mockSymbolsV2;
+      });
+
+      // First call - fetches from LSP
+      const result1 = await client.getDocumentSymbols('test.ts');
+      expect(result1).toEqual(mockSymbolsV1);
+      expect(sendRequestSpy).toHaveBeenCalledTimes(1);
+
+      // Simulate file change (version bump, like syncFileContent does)
+      fileVersions.set('test.ts', 2);
+
+      // Second call - cache invalidated, fetches from LSP again
+      const result2 = await client.getDocumentSymbols('test.ts');
+      expect(result2).toEqual(mockSymbolsV2);
+      expect(sendRequestSpy).toHaveBeenCalledTimes(2);
+
+      getServerSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should cache symbols independently per file', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbolsA = [
+        {
+          name: 'funcA',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 14 } },
+        },
+      ];
+
+      const mockSymbolsB = [
+        {
+          name: 'funcB',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 14 } },
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set(['a.ts', 'b.ts']),
+        fileVersions: new Map([
+          ['a.ts', 1],
+          ['b.ts', 1],
+        ]),
+        symbolCache: new Map(),
+        adapter: undefined,
+      };
+
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      let callCount = 0;
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockImplementation(async () => {
+        callCount++;
+        return callCount === 1 ? mockSymbolsA : mockSymbolsB;
+      });
+
+      // Fetch symbols for both files
+      const resultA = await client.getDocumentSymbols('a.ts');
+      const resultB = await client.getDocumentSymbols('b.ts');
+      expect(resultA).toEqual(mockSymbolsA);
+      expect(resultB).toEqual(mockSymbolsB);
+      expect(sendRequestSpy).toHaveBeenCalledTimes(2);
+
+      // Both should be cached now
+      const cachedA = await client.getDocumentSymbols('a.ts');
+      const cachedB = await client.getDocumentSymbols('b.ts');
+      expect(cachedA).toEqual(mockSymbolsA);
+      expect(cachedB).toEqual(mockSymbolsB);
+      expect(sendRequestSpy).toHaveBeenCalledTimes(2); // No additional calls
+
+      getServerSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should not cache empty results', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        openFiles: new Set(['test.ts']),
+        fileVersions: new Map([['test.ts', 1]]),
+        symbolCache: new Map(),
+        adapter: undefined,
+      };
+
+      const getServerSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'getServer'
+      ).mockResolvedValue(mockServerState);
+
+      const ensureFileOpenSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'ensureFileOpen'
+      ).mockResolvedValue(undefined);
+
+      // Return null (non-array) - should not be cached
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(null);
+
+      const result1 = await client.getDocumentSymbols('test.ts');
+      expect(result1).toEqual([]);
+
+      // Should try again since null results aren't cached
+      const result2 = await client.getDocumentSymbols('test.ts');
+      expect(result2).toEqual([]);
+      expect(sendRequestSpy).toHaveBeenCalledTimes(2);
+
+      getServerSpy.mockRestore();
+      ensureFileOpenSpy.mockRestore();
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should use cache in findSymbolsByName for repeated lookups', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'testFunction',
+          kind: 12,
+          range: { start: { line: 0, character: 0 }, end: { line: 2, character: 1 } },
+          selectionRange: { start: { line: 0, character: 9 }, end: { line: 0, character: 21 } },
+        },
+        {
+          name: 'testVariable',
+          kind: 13,
+          range: { start: { line: 3, character: 0 }, end: { line: 3, character: 20 } },
+          selectionRange: { start: { line: 3, character: 6 }, end: { line: 3, character: 18 } },
+        },
+      ];
+
+      // Spy on getDocumentSymbols which is the public method called by findSymbolsByName
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockResolvedValue(
+        mockSymbols
+      );
+
+      // First lookup
+      const result1 = await client.findSymbolsByName('test.ts', 'testFunction');
+      expect(result1.matches).toHaveLength(1);
+      expect(getDocumentSymbolsSpy).toHaveBeenCalledTimes(1);
+
+      // Second lookup for different symbol in same file
+      const result2 = await client.findSymbolsByName('test.ts', 'testVariable');
+      expect(result2.matches).toHaveLength(1);
+      expect(getDocumentSymbolsSpy).toHaveBeenCalledTimes(2);
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+  });
+
   describe('Symbol kind fallback functionality', () => {
     it('should return fallback results when specified symbol kind not found', async () => {
       const client = new LSPClient(TEST_CONFIG_PATH);

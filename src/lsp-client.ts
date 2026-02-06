@@ -45,6 +45,7 @@ interface ServerState {
   diagnostics: Map<string, Diagnostic[]>; // Store diagnostics by file URI
   lastDiagnosticUpdate: Map<string, number>; // Track last update time per file
   diagnosticVersions: Map<string, number>; // Track diagnostic versions per file
+  symbolCache: Map<string, { version: number; symbols: DocumentSymbol[] | SymbolInformation[] }>; // Cache document symbols per file
   adapter?: import('./lsp/adapters/types.js').ServerAdapter; // Optional adapter for server-specific behavior
 }
 
@@ -214,6 +215,7 @@ export class LSPClient {
       diagnostics: new Map(),
       lastDiagnosticUpdate: new Map(),
       diagnosticVersions: new Map(),
+      symbolCache: new Map(),
       adapter, // Store adapter for later use
     };
 
@@ -1063,6 +1065,16 @@ export class LSPClient {
     // Ensure the file is opened and synced with the LSP server
     await this.ensureFileOpen(serverState, filePath);
 
+    // Check symbol cache - use fileVersions for invalidation
+    const currentVersion = serverState.fileVersions.get(filePath) ?? 0;
+    const cached = serverState.symbolCache.get(filePath);
+    if (cached && cached.version === currentVersion) {
+      process.stderr.write(
+        `[DEBUG] Returning cached documentSymbols for ${filePath} (version ${currentVersion}, ${cached.symbols.length} symbols)\n`
+      );
+      return cached.symbols;
+    }
+
     process.stderr.write(`[DEBUG] Requesting documentSymbol for: ${filePath}\n`);
 
     // Get custom timeout from adapter if available
@@ -1093,7 +1105,10 @@ export class LSPClient {
     }
 
     if (Array.isArray(result)) {
-      return result as DocumentSymbol[] | SymbolInformation[];
+      const symbols = result as DocumentSymbol[] | SymbolInformation[];
+      // Cache the result with current file version
+      serverState.symbolCache.set(filePath, { version: currentVersion, symbols });
+      return symbols;
     }
 
     return [];
