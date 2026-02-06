@@ -320,6 +320,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['file_path', 'line', 'character'],
         },
       },
+      {
+        name: 'find_symbol_anywhere',
+        description:
+          'Find a symbol across the entire workspace without specifying a file. Returns matching symbols with their locations, types, and containing files.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            symbol_name: {
+              type: 'string',
+              description: 'The name of the symbol to search for',
+            },
+            symbol_kind: {
+              type: 'string',
+              description:
+                'Optional filter by symbol kind (function, class, variable, method, interface, etc.)',
+            },
+          },
+          required: ['symbol_name'],
+        },
+      },
     ],
   };
 });
@@ -1153,6 +1173,85 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: `Error finding outgoing calls: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+    }
+
+    if (name === 'find_symbol_anywhere') {
+      const { symbol_name, symbol_kind } = args as {
+        symbol_name: string;
+        symbol_kind?: string;
+      };
+
+      try {
+        const symbols = await lspClient.workspaceSymbol(symbol_name);
+
+        if (symbols.length === 0) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `No symbols found matching "${symbol_name}" in the workspace. Ensure at least one LSP server is running.`,
+              },
+            ],
+          };
+        }
+
+        // Filter by kind if specified
+        let filtered = symbols;
+        if (symbol_kind) {
+          filtered = symbols.filter(
+            (sym) => lspClient.symbolKindToString(sym.kind) === symbol_kind.toLowerCase()
+          );
+
+          if (filtered.length === 0) {
+            // Show what kinds were found as a helpful hint
+            const foundKinds = [
+              ...new Set(symbols.map((sym) => lspClient.symbolKindToString(sym.kind))),
+            ];
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: `No symbols matching "${symbol_name}" with kind "${symbol_kind}" found. Found ${symbols.length} symbol(s) with other kinds: ${foundKinds.join(', ')}.`,
+                },
+              ],
+            };
+          }
+        }
+
+        // Filter to exact or close name matches (workspace/symbol can return partial matches)
+        const exactMatches = filtered.filter((sym) => sym.name === symbol_name);
+        const displaySymbols = exactMatches.length > 0 ? exactMatches : filtered;
+
+        const symbolList = displaySymbols.map((sym) => {
+          const filePath = uriToPath(sym.location.uri);
+          const { start } = sym.location.range;
+          const container = sym.containerName ? ` in ${sym.containerName}` : '';
+          return `• ${sym.name} (${lspClient.symbolKindToString(sym.kind)}) at ${filePath}:${start.line + 1}:${start.character + 1}${container}`;
+        });
+
+        const qualifier =
+          exactMatches.length > 0 && exactMatches.length < filtered.length
+            ? ` (${filtered.length - exactMatches.length} partial match(es) omitted)`
+            : '';
+
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Found ${displaySymbols.length} symbol(s) matching "${symbol_name}"${symbol_kind ? ` with kind "${symbol_kind}"` : ''}${qualifier}:\n\n${symbolList.join('\n')}`,
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `Error searching for symbol: ${error instanceof Error ? error.message : String(error)}`,
             },
           ],
         };

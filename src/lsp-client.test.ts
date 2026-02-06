@@ -1158,6 +1158,167 @@ describe('LSPClient', () => {
     });
   });
 
+  describe('workspaceSymbol with kind filtering (find_symbol_anywhere support)', () => {
+    it('should return symbols filterable by kind using symbolKindToString', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'MyClass',
+          kind: 5, // Class
+          location: {
+            uri: pathToUri('/models.ts'),
+            range: { start: { line: 0, character: 0 }, end: { line: 10, character: 1 } },
+          },
+        },
+        {
+          name: 'myFunction',
+          kind: 12, // Function
+          location: {
+            uri: pathToUri('/utils.ts'),
+            range: { start: { line: 5, character: 0 }, end: { line: 8, character: 1 } },
+          },
+        },
+        {
+          name: 'myVariable',
+          kind: 13, // Variable
+          location: {
+            uri: pathToUri('/config.ts'),
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 20 } },
+          },
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['test-key', mockServerState]]);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      const result = await client.workspaceSymbol('my');
+
+      // Simulate kind filtering as the tool handler does
+      const filtered = result.filter((sym) => client.symbolKindToString(sym.kind) === 'class');
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0]?.name).toBe('MyClass');
+
+      const functions = result.filter((sym) => client.symbolKindToString(sym.kind) === 'function');
+      expect(functions).toHaveLength(1);
+      expect(functions[0]?.name).toBe('myFunction');
+
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should support exact name matching from workspace symbol results', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'handleRequest',
+          kind: 12,
+          location: {
+            uri: pathToUri('/handler.ts'),
+            range: { start: { line: 10, character: 0 }, end: { line: 20, character: 1 } },
+          },
+        },
+        {
+          name: 'handleRequestError',
+          kind: 12,
+          location: {
+            uri: pathToUri('/handler.ts'),
+            range: { start: { line: 25, character: 0 }, end: { line: 30, character: 1 } },
+          },
+        },
+        {
+          name: 'handleRequestTimeout',
+          kind: 12,
+          location: {
+            uri: pathToUri('/handler.ts'),
+            range: { start: { line: 35, character: 0 }, end: { line: 40, character: 1 } },
+          },
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['test-key', mockServerState]]);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      const result = await client.workspaceSymbol('handleRequest');
+      expect(result).toHaveLength(3); // workspace/symbol returns partial matches
+
+      // Simulate exact name filtering as the tool handler does
+      const exactMatches = result.filter((sym) => sym.name === 'handleRequest');
+      expect(exactMatches).toHaveLength(1);
+      expect(exactMatches[0]?.name).toBe('handleRequest');
+
+      sendRequestSpy.mockRestore();
+    });
+
+    it('should include containerName in results for scoped symbols', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const mockSymbols = [
+        {
+          name: 'render',
+          kind: 6, // Method
+          location: {
+            uri: pathToUri('/component.ts'),
+            range: { start: { line: 15, character: 2 }, end: { line: 20, character: 3 } },
+          },
+          containerName: 'MyComponent',
+        },
+        {
+          name: 'render',
+          kind: 6,
+          location: {
+            uri: pathToUri('/widget.ts'),
+            range: { start: { line: 8, character: 2 }, end: { line: 12, character: 3 } },
+          },
+          containerName: 'Widget',
+        },
+      ];
+
+      const mockServerState = {
+        initializationPromise: Promise.resolve(),
+        process: { stdin: { write: jest.fn() } },
+        initialized: true,
+        adapter: undefined,
+      };
+
+      (client as any).servers = new Map([['test-key', mockServerState]]);
+
+      const sendRequestSpy = spyOn(
+        client as unknown as LSPClientInternal,
+        'sendRequest'
+      ).mockResolvedValue(mockSymbols);
+
+      const result = await client.workspaceSymbol('render');
+      expect(result).toHaveLength(2);
+      expect(result[0]?.containerName).toBe('MyComponent');
+      expect(result[1]?.containerName).toBe('Widget');
+
+      sendRequestSpy.mockRestore();
+    });
+  });
+
   describe('findImplementation', () => {
     it('should return array of implementation locations', async () => {
       const client = new LSPClient(TEST_CONFIG_PATH);
