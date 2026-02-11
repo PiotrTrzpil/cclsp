@@ -1873,14 +1873,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-process.on('SIGINT', () => {
-  lspClient.dispose();
-  process.exit(0);
+// Cleanup helper to ensure we only dispose once
+let isDisposing = false;
+function cleanup(reason: string, exitCode = 0) {
+  if (isDisposing) return;
+  isDisposing = true;
+  process.stderr.write(`[cclsp] Cleaning up: ${reason}\n`);
+  try {
+    lspClient.dispose();
+  } catch (error) {
+    process.stderr.write(`[cclsp] Error during cleanup: ${error}\n`);
+  }
+  process.exit(exitCode);
+}
+
+// Handle graceful shutdown signals
+process.on('SIGINT', () => cleanup('SIGINT'));
+process.on('SIGTERM', () => cleanup('SIGTERM'));
+process.on('SIGHUP', () => cleanup('SIGHUP'));
+
+// Handle stdin close - this is the key fix for orphan processes.
+// When the parent process (Claude Code) dies, stdin closes.
+// MCP uses stdio transport, so stdin closing means parent is gone.
+process.stdin.on('close', () => cleanup('stdin closed (parent died)'));
+process.stdin.on('end', () => cleanup('stdin ended (parent died)'));
+
+// Handle uncaught exceptions - clean up before crashing
+process.on('uncaughtException', (error) => {
+  process.stderr.write(`[cclsp] Uncaught exception: ${error}\n`);
+  cleanup('uncaughtException', 1);
 });
 
-process.on('SIGTERM', () => {
-  lspClient.dispose();
-  process.exit(0);
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason) => {
+  process.stderr.write(`[cclsp] Unhandled rejection: ${reason}\n`);
+  cleanup('unhandledRejection', 1);
+});
+
+// Handle normal exit - ensure cleanup happens
+process.on('beforeExit', () => {
+  if (!isDisposing) {
+    cleanup('beforeExit');
+  }
 });
 
 async function main() {
@@ -1897,7 +1931,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`Server error: ${error}\n`);
-  lspClient.dispose();
-  process.exit(1);
+  process.stderr.write(`[cclsp] Server error: ${error}\n`);
+  cleanup('main() error', 1);
 });

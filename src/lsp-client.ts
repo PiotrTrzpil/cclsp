@@ -2122,13 +2122,56 @@ export class LSPClient {
   }
 
   dispose(): void {
+    const serverCount = this.servers.size;
+    if (serverCount > 0) {
+      process.stderr.write(`[LSPClient] Disposing ${serverCount} LSP server(s)...\n`);
+    }
+
     for (const serverState of this.servers.values()) {
       // Clear restart timer if exists
       if (serverState.restartTimer) {
         clearTimeout(serverState.restartTimer);
+        serverState.restartTimer = undefined;
       }
-      serverState.process.kill();
+
+      const pid = serverState.process.pid;
+      const cmd = serverState.config?.command?.[0] || 'unknown';
+
+      try {
+        // Kill the process - check killed property if available
+        const isAlreadyKilled = 'killed' in serverState.process && serverState.process.killed;
+        if (!isAlreadyKilled) {
+          // Send SIGTERM first for graceful shutdown
+          serverState.process.kill('SIGTERM');
+          if (pid) {
+            process.stderr.write(`[LSPClient] Sent SIGTERM to ${cmd} (PID ${pid})\n`);
+          }
+
+          // Force kill after a short delay if still running
+          setTimeout(() => {
+            try {
+              const stillAlive = !('killed' in serverState.process) || !serverState.process.killed;
+              if (stillAlive) {
+                serverState.process.kill('SIGKILL');
+                if (pid) {
+                  process.stderr.write(`[LSPClient] Sent SIGKILL to ${cmd} (PID ${pid})\n`);
+                }
+              }
+            } catch {
+              // Process already dead, ignore
+            }
+          }, 100);
+        }
+      } catch (error) {
+        // Log error but continue disposing other servers
+        if (pid) {
+          process.stderr.write(`[LSPClient] Error killing ${cmd} (PID ${pid}): ${error}\n`);
+        }
+      }
     }
+
     this.servers.clear();
+    this.serversStarting.clear();
+    this.pendingRequests.clear();
   }
 }
