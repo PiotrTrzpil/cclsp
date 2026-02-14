@@ -1106,7 +1106,7 @@ export class LSPClient {
     > = {};
     const warnings: string[] = [];
 
-    for (const [key, serverState] of this.servers.entries()) {
+    for (const serverState of this.servers.values()) {
       const caps = serverState.serverCapabilities?.workspace as
         | { fileOperations?: { willRename?: unknown } }
         | undefined;
