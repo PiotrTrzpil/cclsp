@@ -1747,39 +1747,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sections.push(`Detail: ${match.detail}`);
         }
 
-        // Get definition
-        try {
-          const locations = await lspClient.findDefinition(absolutePath, match.position);
-          if (locations.length > 0) {
-            const defLines = locations.map((loc) => {
-              const filePath = uriToPath(loc.uri);
-              const { start } = loc.range;
-              return `  ${filePath}:${start.line + 1}:${start.character + 1}`;
-            });
-            sections.push(`Definition:\n${defLines.join('\n')}`);
-          }
-        } catch {
-          // Definition lookup failed, skip
+        // Get definition and hover in parallel
+        const [defResult, hoverResult] = await Promise.allSettled([
+          lspClient.findDefinition(absolutePath, match.position),
+          lspClient.hover(absolutePath, match.position),
+        ]);
+
+        if (defResult.status === 'fulfilled' && defResult.value.length > 0) {
+          const defLines = defResult.value.map((loc) => {
+            const filePath = uriToPath(loc.uri);
+            const { start } = loc.range;
+            return `  ${filePath}:${start.line + 1}:${start.character + 1}`;
+          });
+          sections.push(`Definition:\n${defLines.join('\n')}`);
         }
 
-        // Get hover (type info / documentation)
-        try {
-          const hoverResult = await lspClient.hover(absolutePath, match.position);
-          if (hoverResult) {
-            let hoverText: string;
-            if (typeof hoverResult.contents === 'string') {
-              hoverText = hoverResult.contents;
-            } else if (hoverResult.contents && typeof hoverResult.contents === 'object') {
-              hoverText = hoverResult.contents.value || JSON.stringify(hoverResult.contents);
-            } else {
-              hoverText = JSON.stringify(hoverResult.contents);
-            }
-            if (hoverText) {
-              sections.push(`Type/Documentation:\n${hoverText}`);
-            }
+        if (hoverResult.status === 'fulfilled' && hoverResult.value) {
+          const hover = hoverResult.value;
+          let hoverText: string;
+          if (typeof hover.contents === 'string') {
+            hoverText = hover.contents;
+          } else if (hover.contents && typeof hover.contents === 'object') {
+            hoverText = hover.contents.value || JSON.stringify(hover.contents);
+          } else {
+            hoverText = JSON.stringify(hover.contents);
           }
-        } catch {
-          // Hover lookup failed, skip
+          if (hoverText) {
+            sections.push(`Type/Documentation:\n${hoverText}`);
+          }
         }
 
         results.push(sections.join('\n'));

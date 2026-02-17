@@ -52,6 +52,20 @@ interface ServerState {
   dead?: boolean; // Set when the server process exits or errors unexpectedly
 }
 
+/**
+ * Default timeouts for LSP methods that are known to be slower.
+ * Adapters can override these with their own values.
+ */
+const DEFAULT_METHOD_TIMEOUTS: Record<string, number> = {
+  'textDocument/documentSymbol': 45000,
+  'textDocument/references': 45000,
+  'textDocument/rename': 45000,
+  'textDocument/prepareRename': 45000,
+  'workspace/willRenameFiles': 45000,
+};
+
+const DEFAULT_TIMEOUT = 30000;
+
 export class LSPClient {
   private config: Config;
   private servers: Map<string, ServerState> = new Map();
@@ -899,7 +913,7 @@ export class LSPClient {
 
     process.stderr.write('[DEBUG findDefinition] Sending textDocument/definition request\n');
     const method = 'textDocument/definition';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -975,7 +989,7 @@ export class LSPClient {
     );
 
     const method = 'textDocument/references';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -1083,7 +1097,7 @@ export class LSPClient {
 
     process.stderr.write('[DEBUG renameSymbol] Sending textDocument/rename request\n');
     const method = 'textDocument/rename';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -1292,7 +1306,7 @@ export class LSPClient {
 
     // Get custom timeout from adapter if available
     const method = 'textDocument/documentSymbol';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
 
     const result = await this.sendRequest(
       serverState.process,
@@ -1883,7 +1897,7 @@ export class LSPClient {
     await this.ensureFileOpen(serverState, filePath);
 
     const method = 'textDocument/hover';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -1906,6 +1920,12 @@ export class LSPClient {
 
   async workspaceSymbol(query: string): Promise<SymbolInformation[]> {
     process.stderr.write(`[DEBUG workspaceSymbol] Searching for "${query}"\n`);
+
+    // If all servers have died, attempt to re-preload them
+    if (this.servers.size === 0 && this.serversStarting.size === 0) {
+      process.stderr.write('[DEBUG workspaceSymbol] No servers running, attempting to preload...\n');
+      await this.preloadServers(false);
+    }
 
     const servers = Array.from(this.servers.values());
     if (servers.length === 0) {
@@ -1932,7 +1952,7 @@ export class LSPClient {
 
       try {
         const method = 'workspace/symbol';
-        const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+        const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
         const result = await this.sendRequest(serverState.process, method, { query }, timeout);
 
         if (Array.isArray(result)) {
@@ -2011,7 +2031,7 @@ export class LSPClient {
     await this.ensureFileOpen(serverState, filePath);
 
     const method = 'textDocument/implementation';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -2046,7 +2066,7 @@ export class LSPClient {
     await this.ensureFileOpen(serverState, filePath);
 
     const method = 'textDocument/prepareCallHierarchy';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -2073,7 +2093,7 @@ export class LSPClient {
     await serverState.initializationPromise;
 
     const method = 'callHierarchy/incomingCalls';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(serverState.process, method, { item }, timeout);
 
     if (Array.isArray(result)) {
@@ -2092,7 +2112,7 @@ export class LSPClient {
     await serverState.initializationPromise;
 
     const method = 'callHierarchy/outgoingCalls';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? 30000;
+    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
     const result = await this.sendRequest(serverState.process, method, { item }, timeout);
 
     if (Array.isArray(result)) {
