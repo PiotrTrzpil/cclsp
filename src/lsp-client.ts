@@ -49,6 +49,7 @@ interface ServerState {
   symbolCache: Map<string, { version: number; symbols: DocumentSymbol[] | SymbolInformation[] }>; // Cache document symbols per file
   adapter?: import('./lsp/adapters/types.js').ServerAdapter; // Optional adapter for server-specific behavior
   serverCapabilities?: Record<string, unknown>; // Server capabilities from initialize response
+  dead?: boolean; // Set when the server process exits or errors unexpectedly
 }
 
 export class LSPClient {
@@ -58,7 +59,11 @@ export class LSPClient {
   private nextId = 1;
   private pendingRequests: Map<
     number,
-    { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }
+    {
+      resolve: (value: unknown) => void;
+      reject: (reason?: unknown) => void;
+      pid?: number; // PID of the server process this request was sent to
+    }
   > = new Map();
 
   private isPylspServer(serverConfig: LSPServerConfig): boolean {
@@ -261,6 +266,47 @@ export class LSPClient {
       process.stderr.write(data);
     });
 
+    // Handle unexpected server death — fail-fast all pending requests instead of
+    // letting them sit until their 30s+ timeout expires
+    const onServerDeath = (reason: string) => {
+      if (serverState.dead) return;
+      serverState.dead = true;
+
+      const cmd = serverConfig.command.join(' ');
+      process.stderr.write(`[LSPClient] Server died (${cmd}): ${reason}\n`);
+
+      // Clear restart timer
+      if (serverState.restartTimer) {
+        clearTimeout(serverState.restartTimer);
+        serverState.restartTimer = undefined;
+      }
+
+      // Remove from servers map so getServer will start a fresh instance
+      const key = JSON.stringify(serverConfig);
+      this.servers.delete(key);
+
+      // Fail-fast all pending requests sent to this server's process instead of
+      // letting them wait for their full 30s+ timeout
+      const deadPid = childProcess.pid;
+      if (deadPid) {
+        const deadError = new Error(`LSP server died: ${reason}`);
+        for (const [id, entry] of this.pendingRequests.entries()) {
+          if (entry.pid === deadPid) {
+            this.pendingRequests.delete(id);
+            entry.reject(deadError);
+          }
+        }
+      }
+    };
+
+    childProcess.on('exit', (code, signal) => {
+      onServerDeath(`exit code=${code}, signal=${signal}`);
+    });
+
+    childProcess.on('error', (error) => {
+      onServerDeath(`error: ${error.message}`);
+    });
+
     // Initialize the server
     const initializeParams: {
       processId: number | null;
@@ -377,24 +423,31 @@ export class LSPClient {
   }
 
   private handleMessage(message: LSPMessage, serverState?: ServerState) {
-    if (message.id && this.pendingRequests.has(message.id)) {
-      const request = this.pendingRequests.get(message.id);
+    // Distinguish responses from server-initiated requests per JSON-RPC 2.0:
+    // - Responses have `id` + (`result` or `error`), no `method`
+    // - Server requests have `id` + `method`
+    // - Notifications have `method`, no `id`
+    const isResponse = message.id && !message.method;
+
+    if (isResponse && this.pendingRequests.has(message.id as number)) {
+      const request = this.pendingRequests.get(message.id as number);
       if (!request) return;
       const { resolve, reject } = request;
-      this.pendingRequests.delete(message.id);
+      this.pendingRequests.delete(message.id as number);
 
       if (message.error) {
         reject(new Error(message.error.message || 'LSP Error'));
       } else {
         resolve(message.result);
       }
+      return;
     }
 
     // Handle notifications and requests from server
     if (message.method && serverState) {
       const { adapter } = serverState;
 
-      // Try adapter-specific handlers first for custom requests
+      // Try adapter-specific handlers first for custom requests (server-initiated requests have id + method)
       if (message.id && adapter?.handleRequest) {
         adapter
           .handleRequest(message.method, message.params, serverState)
@@ -407,10 +460,15 @@ export class LSPClient {
             });
           })
           .catch((error) => {
-            // Adapter didn't handle it, fall through to standard handling
+            // Send error response back to server per JSON-RPC spec
             process.stderr.write(
               `[DEBUG handleMessage] Adapter did not handle request: ${message.method} - ${error}\n`
             );
+            this.sendMessage(serverState.process, {
+              jsonrpc: '2.0',
+              id: message.id,
+              error: { code: -32603, message: `Internal error: ${error}` },
+            });
           });
         return;
       }
@@ -445,14 +503,18 @@ export class LSPClient {
     }
   }
 
-  private sendMessage(process: ChildProcess, message: LSPMessage): void {
+  private sendMessage(childProcess: ChildProcess, message: LSPMessage): void {
     const content = JSON.stringify(message);
     const header = `Content-Length: ${Buffer.byteLength(content)}\r\n\r\n`;
-    process.stdin?.write(header + content);
+    try {
+      childProcess.stdin?.write(header + content);
+    } catch {
+      // Process stdin may be closed if the server died — ignore EPIPE
+    }
   }
 
   private sendRequest(
-    process: ChildProcess,
+    childProcess: ChildProcess,
     method: string,
     params: unknown,
     timeout = 30000
@@ -480,19 +542,20 @@ export class LSPClient {
           clearTimeout(timeoutId);
           reject(reason);
         },
+        pid: childProcess.pid,
       });
 
-      this.sendMessage(process, message);
+      this.sendMessage(childProcess, message);
     });
   }
 
-  private sendNotification(process: ChildProcess, method: string, params: unknown): void {
+  private sendNotification(childProcess: ChildProcess, method: string, params: unknown): void {
     const message: LSPMessage = {
       jsonrpc: '2.0',
       method,
       params,
     };
-    this.sendMessage(process, message);
+    this.sendMessage(childProcess, message);
   }
 
   private setupRestartTimer(serverState: ServerState): void {
@@ -524,7 +587,9 @@ export class LSPClient {
       serverState.restartTimer = undefined;
     }
 
-    // Terminate old server
+    // Mark as dead before killing to prevent the onServerDeath handler from
+    // double-processing (it checks the dead flag first)
+    serverState.dead = true;
     serverState.process.kill();
 
     // Remove from servers map
@@ -585,7 +650,8 @@ export class LSPClient {
           state.restartTimer = undefined;
         }
 
-        // Terminate old server
+        // Mark as dead before killing to prevent onServerDeath double-processing
+        state.dead = true;
         state.process.kill();
 
         // Remove from servers map
@@ -961,7 +1027,8 @@ export class LSPClient {
           Array<{ range: { start: Position; end: Position }; newText: string }>
         >;
       };
-      return edit.changes ?? null;
+      if (!edit.changes || Object.keys(edit.changes).length === 0) return null;
+      return edit.changes;
     }
 
     if ('documentChanges' in result) {
@@ -1090,7 +1157,9 @@ export class LSPClient {
     > = {};
     const warnings: string[] = [];
 
-    for (const serverState of this.servers.values()) {
+    // Query all servers in parallel to avoid timeout multiplication
+    // (N servers * 45s timeout = unacceptable wait if done sequentially)
+    const serverPromises = Array.from(this.servers.values()).map(async (serverState) => {
       const caps = serverState.serverCapabilities?.workspace as
         | { fileOperations?: { willRename?: unknown } }
         | undefined;
@@ -1098,7 +1167,7 @@ export class LSPClient {
         warnings.push(
           `Server ${serverState.config.command[0]} does not support willRenameFiles — imports handled by this server won't be updated.`
         );
-        continue;
+        return;
       }
 
       try {
@@ -1125,7 +1194,9 @@ export class LSPClient {
           `Failed to get import updates from ${serverState.config.command[0]}: ${error instanceof Error ? error.message : String(error)}`
         );
       }
-    }
+    });
+
+    await Promise.all(serverPromises);
 
     const hasImportChanges = Object.keys(mergedChanges).length > 0;
 
@@ -2080,17 +2151,28 @@ export class LSPClient {
     const startPromises = Array.from(serversToStart).map(async (serverConfig) => {
       try {
         const key = JSON.stringify(serverConfig);
-        if (!this.servers.has(key)) {
-          if (debug) {
-            process.stderr.write(`Preloading LSP server: ${serverConfig.command.join(' ')}\n`);
-          }
-          const serverState = await this.startServer(serverConfig);
+        // Skip if already running or already being started (e.g. by a concurrent getServer call)
+        if (this.servers.has(key) || this.serversStarting.has(key)) {
+          return;
+        }
+        if (debug) {
+          process.stderr.write(`Preloading LSP server: ${serverConfig.command.join(' ')}\n`);
+        }
+        // Register in serversStarting to prevent concurrent getServer from spawning a duplicate
+        const startPromise = this.startServer(serverConfig);
+        this.serversStarting.set(key, startPromise);
+        try {
+          const serverState = await startPromise;
           this.servers.set(key, serverState);
+          this.serversStarting.delete(key);
           if (debug) {
             process.stderr.write(
               `Successfully preloaded LSP server for extensions: ${serverConfig.extensions.join(', ')}\n`
             );
           }
+        } catch (error) {
+          this.serversStarting.delete(key);
+          throw error;
         }
       } catch (error) {
         process.stderr.write(
@@ -2112,6 +2194,9 @@ export class LSPClient {
     }
 
     for (const serverState of this.servers.values()) {
+      // Mark as dead to prevent onServerDeath from firing during dispose
+      serverState.dead = true;
+
       // Clear restart timer if exists
       if (serverState.restartTimer) {
         clearTimeout(serverState.restartTimer);
@@ -2125,26 +2210,13 @@ export class LSPClient {
         // Kill the process - check killed property if available
         const isAlreadyKilled = 'killed' in serverState.process && serverState.process.killed;
         if (!isAlreadyKilled) {
-          // Send SIGTERM first for graceful shutdown
-          serverState.process.kill('SIGTERM');
+          // Send SIGKILL directly during dispose to ensure cleanup before process.exit().
+          // SIGTERM + delayed SIGKILL doesn't work here because process.exit() cancels
+          // pending timers, so the SIGKILL setTimeout would never fire.
+          serverState.process.kill('SIGKILL');
           if (pid) {
-            process.stderr.write(`[LSPClient] Sent SIGTERM to ${cmd} (PID ${pid})\n`);
+            process.stderr.write(`[LSPClient] Sent SIGKILL to ${cmd} (PID ${pid})\n`);
           }
-
-          // Force kill after a short delay if still running
-          setTimeout(() => {
-            try {
-              const stillAlive = !('killed' in serverState.process) || !serverState.process.killed;
-              if (stillAlive) {
-                serverState.process.kill('SIGKILL');
-                if (pid) {
-                  process.stderr.write(`[LSPClient] Sent SIGKILL to ${cmd} (PID ${pid})\n`);
-                }
-              }
-            } catch {
-              // Process already dead, ignore
-            }
-          }, 100);
         }
       } catch (error) {
         // Log error but continue disposing other servers

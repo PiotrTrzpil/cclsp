@@ -183,8 +183,8 @@ describe('moveFile', () => {
     it('should return null for empty documentChanges', () => {
       const client = new LSPClient(TEST_CONFIG_PATH);
 
-      // Empty changes object is still returned as-is (not null)
-      expect((client as any).normalizeWorkspaceEdit({ changes: {} })).toEqual({});
+      // Empty changes object returns null (no actual edits)
+      expect((client as any).normalizeWorkspaceEdit({ changes: {} })).toBeNull();
       // Empty documentChanges array returns null
       expect((client as any).normalizeWorkspaceEdit({ documentChanges: [] })).toBeNull();
 
