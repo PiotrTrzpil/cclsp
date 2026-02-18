@@ -62,6 +62,9 @@ test-tmp/
 # MCP specific
 mcp/*/storage.json
 
+# Generated build info
+src/build-info.ts
+
 # Local claude settings
 .claude/settings.local.json
 .test-move-integration

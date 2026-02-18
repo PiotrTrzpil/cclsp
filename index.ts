@@ -4,24 +4,29 @@ import { resolve } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { BUILD_INFO } from './src/build-info.js';
 import { applyWorkspaceEdit } from './src/file-editor.js';
 import { logger } from './src/logger.js';
 import { LSPClient } from './src/lsp-client.js';
 import { formatLocationWithContext, uriToPath } from './src/utils.js';
 
-// Handle subcommands
+// Handle subcommands and flags
 const args = process.argv.slice(2);
 if (args.length > 0) {
   const subcommand = args[0];
 
-  if (subcommand === 'setup') {
+  if (subcommand === '--version' || subcommand === '-v') {
+    console.log(`cclsp ${BUILD_INFO.version} (${BUILD_INFO.gitCommit}) built ${BUILD_INFO.buildTimestamp}`);
+    process.exit(0);
+  } else if (subcommand === 'setup') {
     const { main } = await import('./src/setup.js');
     await main();
     process.exit(0);
   } else {
     console.error(`Unknown subcommand: ${subcommand}`);
     console.error('Available subcommands:');
-    console.error('  setup    Configure cclsp for your project');
+    console.error('  setup       Configure cclsp for your project');
+    console.error('  --version   Show version and build info');
     console.error('');
     console.error('Run without arguments to start the MCP server.');
     process.exit(1);
@@ -36,7 +41,7 @@ const lspClient = new LSPClient();
 const server = new Server(
   {
     name: 'cclsp',
-    version: '0.1.0',
+    version: BUILD_INFO.version,
   },
   {
     capabilities: {
