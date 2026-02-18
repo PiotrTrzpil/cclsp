@@ -2460,6 +2460,24 @@ export class LSPClient {
     if (debug) {
       logger.info('preloadServers', 'LSP server preloading completed');
     }
+
+    // Fire-and-forget: wait for indexing to complete in the background.
+    // This gives servers a head start so the first tool call is less likely
+    // to hit the "still indexing" early-return.
+    if (debug && this.isAnyServerIndexing()) {
+      const serverCount = this.servers.size;
+      logger.info(
+        'preloadServers',
+        `Waiting for ${serverCount} server(s) to finish indexing in background...`
+      );
+      this.waitForAllIndexing(120000).then((allReady) => {
+        if (allReady) {
+          logger.info('preloadServers', 'All servers finished indexing');
+        } else {
+          logger.warn('preloadServers', 'Some servers still indexing after 120s');
+        }
+      });
+    }
   }
 
   /**
