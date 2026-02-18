@@ -5,6 +5,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { applyWorkspaceEdit } from './src/file-editor.js';
+import { logger } from './src/logger.js';
 import { LSPClient } from './src/lsp-client.js';
 import { formatLocationWithContext, uriToPath } from './src/utils.js';
 
@@ -26,6 +27,9 @@ if (args.length > 0) {
     process.exit(1);
   }
 }
+
+// Initialize file-based logging (set CCLSP_LOG_FILE=/path/to/file to enable)
+logger.init();
 
 const lspClient = new LSPClient();
 
@@ -522,6 +526,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     if (name === 'find_definition') {
+      const toolStart = Date.now();
       const {
         file_path,
         symbol_name,
@@ -537,12 +542,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
       const absolutePath = resolve(file_path);
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
+      logger.info(
+        'find_definition',
+        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'})`
+      );
 
       const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
       const { matches: symbolMatches, warning } = result;
 
-      process.stderr.write(
-        `[DEBUG find_definition] Found ${symbolMatches.length} symbol matches for "${symbol_name}"\n`
+      logger.info(
+        'find_definition',
+        `findSymbolsByName completed in ${Date.now() - toolStart}ms, found ${symbolMatches.length} match(es)`
       );
 
       if (symbolMatches.length === 0) {
@@ -558,14 +568,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const results = [];
       for (const match of symbolMatches) {
-        process.stderr.write(
-          `[DEBUG find_definition] Processing match: ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} at ${match.position.line}:${match.position.character}\n`
+        logger.debug(
+          'find_definition',
+          `Processing match: ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} at ${match.position.line}:${match.position.character}`
         );
         try {
           const locations = await lspClient.findDefinition(absolutePath, match.position);
-          process.stderr.write(
-            `[DEBUG find_definition] findDefinition returned ${locations.length} locations\n`
-          );
 
           if (locations.length > 0) {
             const locationResults = locations
@@ -586,12 +594,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               `Results for ${formatSymbolLabel(match.name, lspClient.symbolKindToString(match.kind), match.containerName)} at ${file_path}:${match.position.line + 1}:${match.position.character + 1}:\n${locationResults}`
             );
           } else {
-            process.stderr.write(
-              `[DEBUG find_definition] No definition found for ${match.name} at position ${match.position.line}:${match.position.character}\n`
+            logger.debug(
+              'find_definition',
+              `No definition found for ${match.name} at position ${match.position.line}:${match.position.character}`
             );
           }
         } catch (error) {
-          process.stderr.write(`[DEBUG find_definition] Error processing match: ${error}\n`);
+          logger.warn('find_definition', `Error processing match: ${error}`);
           // Continue trying other symbols if one fails
         }
       }
@@ -624,6 +633,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'find_references') {
+      const toolStart = Date.now();
       const {
         file_path,
         symbol_name,
@@ -641,9 +651,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
       const absolutePath = resolve(file_path);
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
+      logger.info(
+        'find_references',
+        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'})`
+      );
 
       const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
       const { matches: symbolMatches, warning } = result;
+      logger.info(
+        'find_references',
+        `findSymbolsByName completed in ${Date.now() - toolStart}ms, found ${symbolMatches.length} match(es)`
+      );
 
       if (symbolMatches.length === 0) {
         const responseText = warning
@@ -721,6 +739,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'rename_symbol') {
+      const toolStart = Date.now();
       const {
         file_path,
         symbol_name,
@@ -735,8 +754,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         dry_run?: boolean;
       };
       const absolutePath = resolve(file_path);
+      logger.info(
+        'rename_symbol',
+        `Starting: "${symbol_name}" → "${new_name}" in ${file_path} (kind=${symbol_kind ?? 'any'}, dry_run=${dry_run})`
+      );
 
       const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
+      logger.info(
+        'rename_symbol',
+        `findSymbolsByName completed in ${Date.now() - toolStart}ms, found ${result.matches.length} match(es)`
+      );
       const { matches: symbolMatches, warning } = result;
 
       if (symbolMatches.length === 0) {
@@ -864,6 +891,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'rename_symbol_strict') {
+      const toolStart = Date.now();
       const {
         file_path,
         line,
@@ -878,12 +906,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         dry_run?: boolean;
       };
       const absolutePath = resolve(file_path);
+      logger.info(
+        'rename_symbol_strict',
+        `Starting: "${new_name}" at ${file_path}:${line}:${character} (dry_run=${dry_run})`
+      );
 
       try {
         const workspaceEdit = await lspClient.renameSymbol(
           absolutePath,
           { line: line - 1, character: character - 1 }, // Convert to 0-indexed
           new_name
+        );
+        logger.info(
+          'rename_symbol_strict',
+          `renameSymbol completed in ${Date.now() - toolStart}ms`
         );
 
         if (workspaceEdit?.changes && Object.keys(workspaceEdit.changes).length > 0) {
@@ -954,8 +990,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_diagnostics') {
+      const toolStart = Date.now();
       const { file_path } = args as { file_path: string };
       const absolutePath = resolve(file_path);
+      logger.info('get_diagnostics', `Starting: ${file_path}`);
 
       try {
         const diagnostics = await lspClient.getDiagnostics(absolutePath);
@@ -1008,7 +1046,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'restart_server') {
+      const toolStart = Date.now();
       const { extensions } = args as { extensions?: string[] };
+      logger.info(
+        'restart_server',
+        `Starting: extensions=${extensions ? extensions.join(', ') : 'all'}`
+      );
 
       try {
         const result = await lspClient.restartServers(extensions);
@@ -1044,12 +1087,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_hover') {
+      const toolStart = Date.now();
       const { file_path, line, character } = args as {
         file_path: string;
         line: number;
         character: number;
       };
       const absolutePath = resolve(file_path);
+      logger.info('get_hover', `Starting: ${file_path}:${line}:${character}`);
 
       try {
         const result = await lspClient.hover(absolutePath, {
@@ -1098,6 +1143,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'find_workspace_symbols') {
+      const toolStart = Date.now();
       const {
         query,
         include_context = false,
@@ -1108,6 +1154,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         context_lines?: number;
       };
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
+      logger.info('find_workspace_symbols', `Starting: "${query}"`);
 
       try {
         const symbols = await lspClient.workspaceSymbol(query);
@@ -1160,6 +1207,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'find_implementation') {
+      const toolStart = Date.now();
       const {
         file_path,
         line,
@@ -1175,6 +1223,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
       const absolutePath = resolve(file_path);
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
+      logger.info('find_implementation', `Starting: ${file_path}:${line}:${character}`);
 
       try {
         const locations = await lspClient.findImplementation(absolutePath, {
@@ -1226,12 +1275,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'prepare_call_hierarchy') {
+      const toolStart = Date.now();
       const { file_path, line, character } = args as {
         file_path: string;
         line: number;
         character: number;
       };
       const absolutePath = resolve(file_path);
+      logger.info('prepare_call_hierarchy', `Starting: ${file_path}:${line}:${character}`);
 
       try {
         const items = await lspClient.prepareCallHierarchy(absolutePath, {
@@ -1277,6 +1328,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_incoming_calls') {
+      const toolStart = Date.now();
       const {
         file_path,
         line,
@@ -1292,6 +1344,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
       const absolutePath = resolve(file_path);
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
+      logger.info('get_incoming_calls', `Starting: ${file_path}:${line}:${character}`);
 
       try {
         const items = await lspClient.prepareCallHierarchy(absolutePath, {
@@ -1367,6 +1420,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_outgoing_calls') {
+      const toolStart = Date.now();
       const {
         file_path,
         line,
@@ -1382,6 +1436,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
       const absolutePath = resolve(file_path);
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
+      logger.info('get_outgoing_calls', `Starting: ${file_path}:${line}:${character}`);
 
       try {
         const items = await lspClient.prepareCallHierarchy(absolutePath, {
@@ -1457,10 +1512,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'find_symbol_anywhere') {
+      const toolStart = Date.now();
       const { symbol_name, symbol_kind } = args as {
         symbol_name: string;
         symbol_kind?: string;
       };
+      logger.info(
+        'find_symbol_anywhere',
+        `Starting: "${symbol_name}" (kind=${symbol_kind ?? 'any'})`
+      );
 
       try {
         const symbols = await lspClient.workspaceSymbol(symbol_name);
@@ -1536,6 +1596,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'find_definitions_batch') {
+      const toolStart = Date.now();
       const { items } = args as {
         items: Array<{
           file_path: string;
@@ -1543,6 +1604,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           symbol_kind?: string;
         }>;
       };
+      logger.info('find_definitions_batch', `Starting: ${items.length} item(s)`);
 
       const results: string[] = [];
 
@@ -1607,8 +1669,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_symbols_for_file') {
+      const toolStart = Date.now();
       const { file_path } = args as { file_path: string };
       const absolutePath = resolve(file_path);
+      logger.info('get_symbols_for_file', `Starting: ${file_path}`);
 
       try {
         const symbols = await lspClient.getDocumentSymbols(absolutePath);
@@ -1713,12 +1777,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'get_symbol_info') {
+      const toolStart = Date.now();
       const { file_path, symbol_name, symbol_kind } = args as {
         file_path: string;
         symbol_name: string;
         symbol_kind?: string;
       };
       const absolutePath = resolve(file_path);
+      logger.info(
+        'get_symbol_info',
+        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'})`
+      );
 
       const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
       const { matches: symbolMatches, warning } = result;
@@ -1795,6 +1864,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     if (name === 'move_file') {
+      const toolStart = Date.now();
       const {
         source_path,
         destination_path,
@@ -1807,6 +1877,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       const absoluteSource = resolve(source_path);
       const absoluteDest = resolve(destination_path);
+      logger.info(
+        'move_file',
+        `Starting: ${source_path} -> ${destination_path} (dry_run=${dry_run})`
+      );
 
       const result = await lspClient.moveFile(absoluteSource, absoluteDest, dry_run);
 
@@ -1873,11 +1947,11 @@ let isDisposing = false;
 function cleanup(reason: string, exitCode = 0) {
   if (isDisposing) return;
   isDisposing = true;
-  process.stderr.write(`[cclsp] Cleaning up: ${reason}\n`);
+  logger.info('cleanup', `Cleaning up: ${reason}`);
   try {
     lspClient.dispose();
   } catch (error) {
-    process.stderr.write(`[cclsp] Error during cleanup: ${error}\n`);
+    logger.error('cleanup', `Error during cleanup: ${error}`);
   }
   process.exit(exitCode);
 }
@@ -1895,13 +1969,13 @@ process.stdin.on('end', () => cleanup('stdin ended (parent died)'));
 
 // Handle uncaught exceptions - clean up before crashing
 process.on('uncaughtException', (error) => {
-  process.stderr.write(`[cclsp] Uncaught exception: ${error}\n`);
+  logger.error('process', `Uncaught exception: ${error}`);
   cleanup('uncaughtException', 1);
 });
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (reason) => {
-  process.stderr.write(`[cclsp] Unhandled rejection: ${reason}\n`);
+  logger.error('process', `Unhandled rejection: ${reason}`);
   cleanup('unhandledRejection', 1);
 });
 
@@ -1915,17 +1989,17 @@ process.on('beforeExit', () => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  process.stderr.write('CCLSP Server running on stdio\n');
+  logger.info('main', 'CCLSP Server running on stdio');
 
   // Preload LSP servers for file types found in the project
   try {
     await lspClient.preloadServers();
   } catch (error) {
-    process.stderr.write(`Failed to preload LSP servers: ${error}\n`);
+    logger.error('main', `Failed to preload LSP servers: ${error}`);
   }
 }
 
 main().catch((error) => {
-  process.stderr.write(`[cclsp] Server error: ${error}\n`);
+  logger.error('main', `Server error: ${error}`);
   cleanup('main() error', 1);
 });

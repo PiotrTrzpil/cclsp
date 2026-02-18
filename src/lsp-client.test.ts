@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, jest, spyOn } from 'bun:test';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { LSPClient } from './lsp-client.js';
+import { LSPClient, hasId } from './lsp-client.js';
 import { pathToUri, uriToPath } from './utils.js';
 
 // Type for accessing private methods in tests
@@ -75,8 +75,9 @@ describe('LSPClient', () => {
     }).toThrow('process.exit called');
 
     expect(exitSpy).toHaveBeenCalledWith(1);
+    // Logger formats as: [timestamp] [LEVEL] [component] message
     expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to load config from /nonexistent/config.json')
+      expect.stringContaining('Failed to load from /nonexistent/config.json')
     );
 
     stderrSpy.mockRestore();
@@ -1426,8 +1427,9 @@ describe('LSPClient', () => {
       const result = await client.getDiagnostics('/test.ts');
 
       expect(result).toEqual(mockDiagnostics);
+      // Logger formats as: [timestamp] [LEVEL] [component] message
       expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Returning 1 cached diagnostics from publishDiagnostics')
+        expect.stringContaining('returning 1 cached diagnostics')
       );
 
       getServerSpy.mockRestore();
@@ -1468,6 +1470,7 @@ describe('LSPClient', () => {
       const result = await client.getDiagnostics('/test.ts');
 
       expect(result).toEqual([]);
+      // Logger formats as: [timestamp] [LEVEL] [component] message
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('textDocument/diagnostic not supported or failed')
       );
@@ -2719,5 +2722,31 @@ describe('LSPClient', () => {
       sendRequestSpy.mockRestore();
       ensureFileOpenSpy.mockRestore();
     });
+  });
+});
+
+describe('hasId', () => {
+  it('should return true for id=1 (typical client request id)', () => {
+    expect(hasId({ id: 1 })).toBe(true);
+  });
+
+  it('should return true for id=0 (common server-initiated request id)', () => {
+    // This is the critical case: pyright/basedpyright starts server request IDs at 0.
+    // Previously, id=0 was treated as falsy, causing server requests to be silently
+    // dropped, which hung the server and caused rename timeouts.
+    expect(hasId({ id: 0 })).toBe(true);
+  });
+
+  it('should return false for undefined id (notifications)', () => {
+    expect(hasId({})).toBe(false);
+    expect(hasId({ id: undefined })).toBe(false);
+  });
+
+  it('should return false for null id', () => {
+    expect(hasId({ id: null })).toBe(false);
+  });
+
+  it('should return true for negative ids', () => {
+    expect(hasId({ id: -1 })).toBe(true);
   });
 });

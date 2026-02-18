@@ -4,6 +4,7 @@ import { constants, access, readFile } from 'node:fs/promises';
 import { dirname, join, normalize, relative } from 'node:path';
 import { applyWorkspaceEdit } from './file-editor.js';
 import { loadGitignore, scanDirectoryForExtensions } from './file-scanner.js';
+import { logger } from './logger.js';
 import { adapterRegistry } from './lsp/adapters/registry.js';
 import type {
   CallHierarchyIncomingCall,
@@ -23,6 +24,11 @@ import type {
 } from './types.js';
 import { SymbolKind } from './types.js';
 import { pathToUri, uriToPath } from './utils.js';
+
+/** Check if a JSON-RPC message has an id (handles id=0 correctly) */
+export function hasId(message: { id?: number | null }): boolean {
+  return message.id !== undefined && message.id !== null;
+}
 
 interface LSPMessage {
   jsonrpc: string;
@@ -87,13 +93,12 @@ export class LSPClient {
   constructor(configPath?: string) {
     // First try to load from environment variable (MCP config)
     if (process.env.CCLSP_CONFIG_PATH) {
-      process.stderr.write(
-        `Loading config from CCLSP_CONFIG_PATH: ${process.env.CCLSP_CONFIG_PATH}\n`
-      );
+      logger.info('config', `Loading from CCLSP_CONFIG_PATH: ${process.env.CCLSP_CONFIG_PATH}`);
 
       if (!existsSync(process.env.CCLSP_CONFIG_PATH)) {
-        process.stderr.write(
-          `Config file specified in CCLSP_CONFIG_PATH does not exist: ${process.env.CCLSP_CONFIG_PATH}\n`
+        logger.error(
+          'config',
+          `Config file specified in CCLSP_CONFIG_PATH does not exist: ${process.env.CCLSP_CONFIG_PATH}`
         );
         process.exit(1);
       }
@@ -101,32 +106,34 @@ export class LSPClient {
       try {
         const configData = readFileSync(process.env.CCLSP_CONFIG_PATH, 'utf-8');
         this.config = JSON.parse(configData);
-        process.stderr.write(
-          `Loaded ${this.config.servers.length} server configurations from env\n`
+        logger.info(
+          'config',
+          `Loaded ${this.config.servers.length} server configurations from env`
         );
         return;
       } catch (error) {
-        process.stderr.write(`Failed to load config from CCLSP_CONFIG_PATH: ${error}\n`);
+        logger.error('config', `Failed to load from CCLSP_CONFIG_PATH: ${error}`);
         process.exit(1);
       }
     }
 
     // configPath must be provided if CCLSP_CONFIG_PATH is not set
     if (!configPath) {
-      process.stderr.write(
-        'Error: configPath is required when CCLSP_CONFIG_PATH environment variable is not set\n'
+      logger.error(
+        'config',
+        'configPath is required when CCLSP_CONFIG_PATH environment variable is not set'
       );
       process.exit(1);
     }
 
     // Try to load from config file
     try {
-      process.stderr.write(`Loading config from file: ${configPath}\n`);
+      logger.info('config', `Loading from file: ${configPath}`);
       const configData = readFileSync(configPath, 'utf-8');
       this.config = JSON.parse(configData);
-      process.stderr.write(`Loaded ${this.config.servers.length} server configurations\n`);
+      logger.info('config', `Loaded ${this.config.servers.length} server configurations`);
     } catch (error) {
-      process.stderr.write(`Failed to load config from ${configPath}: ${error}\n`);
+      logger.error('config', `Failed to load from ${configPath}: ${error}`);
       process.exit(1);
     }
   }
@@ -135,9 +142,10 @@ export class LSPClient {
     const extension = filePath.split('.').pop();
     if (!extension) return null;
 
-    process.stderr.write(`Looking for server for extension: ${extension}\n`);
-    process.stderr.write(
-      `Available servers: ${this.config.servers.map((s) => s.extensions.join(',')).join(' | ')}\n`
+    logger.debug('getServerForFile', `Looking for server for extension: ${extension}`);
+    logger.debug(
+      'getServerForFile',
+      `Available servers: ${this.config.servers.map((s) => s.extensions.join(',')).join(' | ')}`
     );
 
     // Find all servers that support this extension
@@ -146,7 +154,7 @@ export class LSPClient {
     );
 
     if (matchingServers.length === 0) {
-      process.stderr.write(`No server found for extension: ${extension}\n`);
+      logger.debug('getServerForFile', `No server found for extension: ${extension}`);
       return null;
     }
 
@@ -154,7 +162,10 @@ export class LSPClient {
     if (matchingServers.length === 1) {
       const server = matchingServers[0];
       if (server) {
-        process.stderr.write(`Found server for ${extension}: ${server.command.join(' ')}\n`);
+        logger.debug(
+          'getServerForFile',
+          `Found server for ${extension}: ${server.command.join(' ')}`
+        );
       }
       return server || null;
     }
@@ -193,8 +204,9 @@ export class LSPClient {
     const server = bestMatch || matchingServers[0];
 
     if (server) {
-      process.stderr.write(
-        `Found server for ${extension}: ${server.command.join(' ')} (rootDir: ${server.rootDir || '.'})\n`
+      logger.debug(
+        'getServerForFile',
+        `Found server for ${extension}: ${server.command.join(' ')} (rootDir: ${server.rootDir || '.'})`
       );
     }
 
@@ -219,8 +231,9 @@ export class LSPClient {
     // Auto-detect adapter for this server
     const adapter = adapterRegistry.getAdapter(serverConfig);
     if (adapter) {
-      process.stderr.write(
-        `Using adapter "${adapter.name}" for server: ${serverConfig.command.join(' ')}\n`
+      logger.info(
+        'startServer',
+        `Using adapter "${adapter.name}" for server: ${serverConfig.command.join(' ')}`
       );
     }
 
@@ -243,13 +256,17 @@ export class LSPClient {
     // Store the resolve function to call when initialized notification is received
     serverState.initializationResolve = initializationResolve;
 
-    let buffer = '';
-    childProcess.stdout?.on('data', (data: Buffer) => {
-      buffer += data.toString();
+    let buffer = Buffer.alloc(0);
+    const HEADER_SEPARATOR = Buffer.from('\r\n\r\n');
 
-      while (buffer.includes('\r\n\r\n')) {
-        const headerEndIndex = buffer.indexOf('\r\n\r\n');
-        const headerPart = buffer.substring(0, headerEndIndex);
+    childProcess.stdout?.on('data', (data: Buffer) => {
+      buffer = Buffer.concat([buffer, data]);
+
+      while (true) {
+        const headerEndIndex = buffer.indexOf(HEADER_SEPARATOR);
+        if (headerEndIndex === -1) break;
+
+        const headerPart = buffer.subarray(0, headerEndIndex).toString('ascii');
         const contentLengthMatch = headerPart.match(/Content-Length: (\d+)/);
 
         if (contentLengthMatch?.[1]) {
@@ -257,27 +274,29 @@ export class LSPClient {
           const messageStart = headerEndIndex + 4;
 
           if (buffer.length >= messageStart + contentLength) {
-            const messageContent = buffer.substring(messageStart, messageStart + contentLength);
-            buffer = buffer.substring(messageStart + contentLength);
+            const messageContent = buffer
+              .subarray(messageStart, messageStart + contentLength)
+              .toString('utf-8');
+            buffer = buffer.subarray(messageStart + contentLength);
 
             try {
               const message: LSPMessage = JSON.parse(messageContent);
               this.handleMessage(message, serverState);
             } catch (error) {
-              process.stderr.write(`Failed to parse LSP message: ${error}\n`);
+              logger.warn('startServer', `Failed to parse LSP message: ${error}`);
             }
           } else {
             break;
           }
         } else {
-          buffer = buffer.substring(headerEndIndex + 4);
+          buffer = buffer.subarray(headerEndIndex + 4);
         }
       }
     });
 
     childProcess.stderr?.on('data', (data: Buffer) => {
-      // Forward LSP server stderr directly to MCP stderr
-      process.stderr.write(data);
+      // Forward LSP server stderr to logger
+      logger.debug('lsp-stderr', data.toString().trimEnd());
     });
 
     // Handle unexpected server death — fail-fast all pending requests instead of
@@ -287,7 +306,7 @@ export class LSPClient {
       serverState.dead = true;
 
       const cmd = serverConfig.command.join(' ');
-      process.stderr.write(`[LSPClient] Server died (${cmd}): ${reason}\n`);
+      logger.error('onServerDeath', `Server died (${cmd}): ${reason}`);
 
       // Clear restart timer
       if (serverState.restartTimer) {
@@ -441,7 +460,14 @@ export class LSPClient {
     // - Responses have `id` + (`result` or `error`), no `method`
     // - Server requests have `id` + `method`
     // - Notifications have `method`, no `id`
-    const isResponse = message.id && !message.method;
+    //
+    // CRITICAL: Use hasId() instead of truthiness check on message.id because
+    // id=0 is a valid JSON-RPC id but is falsy in JavaScript. Servers like
+    // pyright/basedpyright start their request IDs at 0, so failing to handle
+    // id=0 causes the server to hang waiting for a response (the root cause of
+    // rename_symbol timeouts).
+    const msgHasId = hasId(message);
+    const isResponse = msgHasId && !message.method;
 
     if (isResponse && this.pendingRequests.has(message.id as number)) {
       const request = this.pendingRequests.get(message.id as number);
@@ -450,6 +476,10 @@ export class LSPClient {
       this.pendingRequests.delete(message.id as number);
 
       if (message.error) {
+        logger.warn(
+          'handleMessage',
+          `LSP error response for request ${message.id}: ${message.error.message || 'unknown error'}`
+        );
         reject(new Error(message.error.message || 'LSP Error'));
       } else {
         resolve(message.result);
@@ -462,7 +492,11 @@ export class LSPClient {
       const { adapter } = serverState;
 
       // Try adapter-specific handlers first for custom requests (server-initiated requests have id + method)
-      if (message.id && adapter?.handleRequest) {
+      if (msgHasId && adapter?.handleRequest) {
+        logger.debug(
+          'handleMessage',
+          `Delegating server request to adapter: ${message.method} (id=${message.id})`
+        );
         adapter
           .handleRequest(message.method, message.params, serverState)
           .then((result) => {
@@ -475,8 +509,9 @@ export class LSPClient {
           })
           .catch((error) => {
             // Send error response back to server per JSON-RPC spec
-            process.stderr.write(
-              `[DEBUG handleMessage] Adapter did not handle request: ${message.method} - ${error}\n`
+            logger.debug(
+              'handleMessage',
+              `Adapter did not handle request: ${message.method} - ${error}`
             );
             this.sendMessage(serverState.process, {
               jsonrpc: '2.0',
@@ -487,8 +522,61 @@ export class LSPClient {
         return;
       }
 
-      // Try adapter-specific notification handlers
-      if (!message.id && adapter?.handleNotification) {
+      // Handle server-initiated requests that have no adapter handler.
+      // Per JSON-RPC, every request MUST get a response — otherwise the server
+      // blocks waiting, which stalls all subsequent LSP requests (e.g. rename).
+      if (msgHasId) {
+        logger.info(
+          'handleMessage',
+          `Auto-responding to server request: ${message.method} (id=${message.id})`
+        );
+
+        let result: unknown = null;
+
+        // workspace/configuration expects an array matching params.items length.
+        // Return server-appropriate settings to avoid resetting initializationOptions.
+        if (
+          message.method === 'workspace/configuration' &&
+          message.params &&
+          typeof message.params === 'object' &&
+          'items' in message.params &&
+          Array.isArray((message.params as { items: unknown[] }).items)
+        ) {
+          const items = (message.params as { items: Array<{ section?: string }> }).items;
+          result = items.map((item) => {
+            // For pylsp, return settings that keep heavy plugins disabled
+            // (matches what we send in initializationOptions)
+            if (item.section === 'pylsp' && this.isPylspServer(serverState.config)) {
+              return {
+                plugins: {
+                  jedi_completion: { enabled: true },
+                  jedi_definition: { enabled: true },
+                  jedi_hover: { enabled: true },
+                  jedi_references: { enabled: true },
+                  jedi_signature_help: { enabled: true },
+                  jedi_symbols: { enabled: true },
+                  pylint: { enabled: false },
+                  pycodestyle: { enabled: false },
+                  pyflakes: { enabled: false },
+                  yapf: { enabled: false },
+                  rope_completion: { enabled: false },
+                },
+              };
+            }
+            return {};
+          });
+        }
+
+        this.sendMessage(serverState.process, {
+          jsonrpc: '2.0',
+          id: message.id,
+          result,
+        });
+        return;
+      }
+
+      // Try adapter-specific notification handlers (notifications have method but no id)
+      if (!msgHasId && adapter?.handleNotification) {
         const handled = adapter.handleNotification(message.method, message.params, serverState);
         if (handled) {
           return;
@@ -504,8 +592,9 @@ export class LSPClient {
           version?: number;
         };
         if (params?.uri) {
-          process.stderr.write(
-            `[DEBUG handleMessage] Received publishDiagnostics for ${params.uri} with ${params.diagnostics?.length || 0} diagnostics${params.version !== undefined ? ` (version: ${params.version})` : ''}\n`
+          logger.debug(
+            'handleMessage',
+            `publishDiagnostics for ${params.uri}: ${params.diagnostics?.length || 0} diagnostics${params.version !== undefined ? ` (version: ${params.version})` : ''}`
           );
           serverState.diagnostics.set(params.uri, params.diagnostics || []);
           serverState.lastDiagnosticUpdate.set(params.uri, Date.now());
@@ -541,19 +630,37 @@ export class LSPClient {
       params,
     };
 
+    const startTime = Date.now();
+    logger.info(
+      'sendRequest',
+      `→ ${method} (id=${id}, timeout=${timeout}ms, pid=${childProcess.pid})`
+    );
+
     return new Promise((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(id);
+        const elapsed = Date.now() - startTime;
+        logger.error(
+          'sendRequest',
+          `✗ TIMEOUT ${method} (id=${id}) after ${elapsed}ms — pending requests: ${this.pendingRequests.size}`
+        );
         reject(new Error(`LSP request timeout: ${method} (${timeout}ms)`));
       }, timeout);
 
       this.pendingRequests.set(id, {
         resolve: (value: unknown) => {
           clearTimeout(timeoutId);
+          const elapsed = Date.now() - startTime;
+          logger.info('sendRequest', `← ${method} (id=${id}) completed in ${elapsed}ms`);
           resolve(value);
         },
         reject: (reason?: unknown) => {
           clearTimeout(timeoutId);
+          const elapsed = Date.now() - startTime;
+          logger.warn(
+            'sendRequest',
+            `← ${method} (id=${id}) rejected after ${elapsed}ms: ${reason}`
+          );
           reject(reason);
         },
         pid: childProcess.pid,
@@ -579,9 +686,7 @@ export class LSPClient {
       const actualInterval = Math.max(serverState.config.restartInterval, minInterval);
       const intervalMs = actualInterval * 60 * 1000; // Convert minutes to milliseconds
 
-      process.stderr.write(
-        `[DEBUG setupRestartTimer] Setting up restart timer for ${actualInterval} minutes\n`
-      );
+      logger.debug('setupRestartTimer', `Setting up restart timer for ${actualInterval} minutes`);
 
       serverState.restartTimer = setTimeout(() => {
         this.restartServer(serverState);
@@ -591,8 +696,9 @@ export class LSPClient {
 
   private async restartServer(serverState: ServerState): Promise<void> {
     const key = JSON.stringify(serverState.config);
-    process.stderr.write(
-      `[DEBUG restartServer] Restarting LSP server for ${serverState.config.command.join(' ')}\n`
+    logger.info(
+      'restartServer',
+      `Restarting LSP server for ${serverState.config.command.join(' ')}`
     );
 
     // Clear existing timer
@@ -614,11 +720,12 @@ export class LSPClient {
       const newServerState = await this.startServer(serverState.config);
       this.servers.set(key, newServerState);
 
-      process.stderr.write(
-        `[DEBUG restartServer] Successfully restarted LSP server for ${serverState.config.command.join(' ')}\n`
+      logger.info(
+        'restartServer',
+        `Successfully restarted LSP server for ${serverState.config.command.join(' ')}`
       );
     } catch (error) {
-      process.stderr.write(`[DEBUG restartServer] Failed to restart LSP server: ${error}\n`);
+      logger.error('restartServer', `Failed to restart LSP server: ${error}`);
     }
   }
 
@@ -633,8 +740,9 @@ export class LSPClient {
     const restarted: string[] = [];
     const failed: string[] = [];
 
-    process.stderr.write(
-      `[DEBUG restartServers] Request to restart servers for extensions: ${extensions ? extensions.join(', ') : 'all'}\n`
+    logger.info(
+      'restartServers',
+      `Request to restart servers for extensions: ${extensions ? extensions.join(', ') : 'all'}`
     );
 
     // Collect servers to restart
@@ -676,10 +784,10 @@ export class LSPClient {
         this.servers.set(key, newServerState);
 
         restarted.push(serverDesc);
-        process.stderr.write(`[DEBUG restartServers] Successfully restarted: ${serverDesc}\n`);
+        logger.info('restartServers', `Successfully restarted: ${serverDesc}`);
       } catch (error) {
         failed.push(`${serverDesc}: ${error}`);
-        process.stderr.write(`[DEBUG restartServers] Failed to restart: ${serverDesc}: ${error}\n`);
+        logger.error('restartServers', `Failed to restart: ${serverDesc}: ${error}`);
       }
     }
 
@@ -707,13 +815,11 @@ export class LSPClient {
 
       // If file is not already open in the LSP server, open it first
       if (!serverState.openFiles.has(filePath)) {
-        process.stderr.write(
-          `[DEBUG syncFileContent] File not open, opening it first: ${filePath}\n`
-        );
+        logger.debug('syncFileContent', `File not open, opening it first: ${filePath}`);
         await this.ensureFileOpen(serverState, filePath);
       }
 
-      process.stderr.write(`[DEBUG syncFileContent] Syncing file: ${filePath}\n`);
+      logger.debug('syncFileContent', `Syncing file: ${filePath}`);
 
       const fileContent = readFileSync(filePath, 'utf-8');
       const uri = pathToUri(filePath);
@@ -734,11 +840,9 @@ export class LSPClient {
         ],
       });
 
-      process.stderr.write(
-        `[DEBUG syncFileContent] File synced with version ${version}: ${filePath}\n`
-      );
+      logger.debug('syncFileContent', `File synced with version ${version}: ${filePath}`);
     } catch (error) {
-      process.stderr.write(`[DEBUG syncFileContent] Failed to sync file ${filePath}: ${error}\n`);
+      logger.warn('syncFileContent', `Failed to sync file ${filePath}: ${error}`);
       // Don't throw - syncing is best effort
     }
   }
@@ -746,19 +850,20 @@ export class LSPClient {
   private async ensureFileOpen(serverState: ServerState, filePath: string): Promise<boolean> {
     const wasAlreadyOpen = serverState.openFiles.has(filePath);
     if (wasAlreadyOpen) {
-      process.stderr.write(`[DEBUG ensureFileOpen] File already open: ${filePath}\n`);
+      logger.debug('ensureFileOpen', `File already open: ${filePath}`);
       return false; // Return false to indicate file was already open
     }
 
-    process.stderr.write(`[DEBUG ensureFileOpen] Opening file: ${filePath}\n`);
+    logger.debug('ensureFileOpen', `Opening file: ${filePath}`);
 
     try {
       const fileContent = readFileSync(filePath, 'utf-8');
       const uri = pathToUri(filePath);
       const languageId = this.getLanguageId(filePath);
 
-      process.stderr.write(
-        `[DEBUG ensureFileOpen] File content length: ${fileContent.length}, languageId: ${languageId}\n`
+      logger.debug(
+        'ensureFileOpen',
+        `File content length: ${fileContent.length}, languageId: ${languageId}`
       );
 
       await this.sendNotification(serverState.process, 'textDocument/didOpen', {
@@ -772,10 +877,10 @@ export class LSPClient {
 
       serverState.openFiles.add(filePath);
       serverState.fileVersions.set(filePath, 1);
-      process.stderr.write(`[DEBUG ensureFileOpen] File opened successfully: ${filePath}\n`);
+      logger.debug('ensureFileOpen', `File opened successfully: ${filePath}`);
       return true; // Return true to indicate file was just opened
     } catch (error) {
-      process.stderr.write(`[DEBUG ensureFileOpen] Failed to open file ${filePath}: ${error}\n`);
+      logger.error('ensureFileOpen', `Failed to open file ${filePath}: ${error}`);
       throw error;
     }
   }
@@ -836,32 +941,38 @@ export class LSPClient {
   }
 
   private async getServer(filePath: string): Promise<ServerState> {
-    process.stderr.write(`[DEBUG getServer] Getting server for file: ${filePath}\n`);
+    logger.debug('getServer', `Getting server for file: ${filePath}`);
 
     const serverConfig = this.getServerForFile(filePath);
     if (!serverConfig) {
       throw new Error(`No LSP server configured for file: ${filePath}`);
     }
 
-    process.stderr.write(
-      `[DEBUG getServer] Found server config: ${serverConfig.command.join(' ')}\n`
-    );
+    const cmd = serverConfig.command.join(' ');
+    logger.debug('getServer', `Found server config: ${cmd}`);
 
     const key = JSON.stringify(serverConfig);
 
     // Check if server already exists
     if (this.servers.has(key)) {
-      process.stderr.write('[DEBUG getServer] Using existing server instance\n');
       const server = this.servers.get(key);
       if (!server) {
         throw new Error('Server exists in map but is undefined');
       }
-      return server;
+
+      // If the server is marked dead, remove it and start a fresh one
+      if (server.dead) {
+        logger.warn('getServer', `Cached server is dead (${cmd}), removing and starting fresh`);
+        this.servers.delete(key);
+      } else {
+        logger.debug('getServer', `Using existing server (${cmd}, pid=${server.process.pid})`);
+        return server;
+      }
     }
 
     // Check if server is currently starting
     if (this.serversStarting.has(key)) {
-      process.stderr.write('[DEBUG getServer] Waiting for server startup in progress\n');
+      logger.debug('getServer', `Waiting for server startup in progress (${cmd})`);
       const startPromise = this.serversStarting.get(key);
       if (!startPromise) {
         throw new Error('Server start promise exists in map but is undefined');
@@ -870,7 +981,7 @@ export class LSPClient {
     }
 
     // Start new server with concurrency protection
-    process.stderr.write('[DEBUG getServer] Starting new server instance\n');
+    logger.info('getServer', `Starting new server: ${cmd}`);
     const startPromise = this.startServer(serverConfig);
     this.serversStarting.set(key, startPromise);
 
@@ -878,7 +989,10 @@ export class LSPClient {
       const serverState = await startPromise;
       this.servers.set(key, serverState);
       this.serversStarting.delete(key);
-      process.stderr.write('[DEBUG getServer] Server started and cached\n');
+      logger.info(
+        'getServer',
+        `Server started and cached (${cmd}, pid=${serverState.process.pid})`
+      );
       return serverState;
     } catch (error) {
       this.serversStarting.delete(key);
@@ -887,9 +1001,8 @@ export class LSPClient {
   }
 
   async findDefinition(filePath: string, position: Position): Promise<Location[]> {
-    process.stderr.write(
-      `[DEBUG findDefinition] Requesting definition for ${filePath} at ${position.line}:${position.character}\n`
-    );
+    const startTime = Date.now();
+    logger.info('findDefinition', `${filePath} at ${position.line}:${position.character}`);
 
     const serverState = await this.getServer(filePath);
 
@@ -902,18 +1015,19 @@ export class LSPClient {
     // If the file was just opened, give the LSP server time to index the project
     // This fixes issue #27 where the first find_references call returns incomplete results
     if (wasJustOpened) {
-      process.stderr.write(
-        '[DEBUG findDefinition] File was just opened, waiting for server to index project...\n'
+      logger.debug(
+        'findDefinition',
+        'File was just opened, waiting for server to index project...'
       );
-      // Wait a short time for the server to process the didOpen notification
-      // and start indexing the project. This is especially important for
-      // workspace-wide operations like find_references.
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
 
-    process.stderr.write('[DEBUG findDefinition] Sending textDocument/definition request\n');
+    logger.debug('findDefinition', 'Sending textDocument/definition request');
     const method = 'textDocument/definition';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -924,27 +1038,23 @@ export class LSPClient {
       timeout
     );
 
-    process.stderr.write(
-      `[DEBUG findDefinition] Result type: ${typeof result}, isArray: ${Array.isArray(result)}\n`
-    );
-
     if (Array.isArray(result)) {
-      process.stderr.write(`[DEBUG findDefinition] Array result with ${result.length} locations\n`);
-      if (result.length > 0) {
-        process.stderr.write(
-          `[DEBUG findDefinition] First location: ${JSON.stringify(result[0], null, 2)}\n`
-        );
-      }
-      return result.map((loc: LSPLocation) => ({
+      const locations = result.map((loc: LSPLocation) => ({
         uri: loc.uri,
         range: loc.range,
       }));
+      logger.info(
+        'findDefinition',
+        `completed in ${Date.now() - startTime}ms, returned ${locations.length} location(s)`
+      );
+      return locations;
     }
     if (result && typeof result === 'object' && 'uri' in result) {
-      process.stderr.write(
-        `[DEBUG findDefinition] Single location result: ${JSON.stringify(result, null, 2)}\n`
-      );
       const location = result as LSPLocation;
+      logger.info(
+        'findDefinition',
+        `completed in ${Date.now() - startTime}ms, returned 1 location`
+      );
       return [
         {
           uri: location.uri,
@@ -953,9 +1063,7 @@ export class LSPClient {
       ];
     }
 
-    process.stderr.write(
-      '[DEBUG findDefinition] No definition found or unexpected result format\n'
-    );
+    logger.info('findDefinition', `completed in ${Date.now() - startTime}ms, no definition found`);
     return [];
   }
 
@@ -964,6 +1072,12 @@ export class LSPClient {
     position: Position,
     includeDeclaration = true
   ): Promise<Location[]> {
+    const startTime = Date.now();
+    logger.info(
+      'findReferences',
+      `${filePath} at ${position.line}:${position.character}, includeDeclaration: ${includeDeclaration}`
+    );
+
     const serverState = await this.getServer(filePath);
 
     // Wait for the server to be fully initialized
@@ -975,21 +1089,18 @@ export class LSPClient {
     // If the file was just opened, give the LSP server time to index the project
     // This fixes issue #27 where the first find_references call returns incomplete results
     if (wasJustOpened) {
-      process.stderr.write(
-        '[DEBUG findReferences] File was just opened, waiting for server to index project...\n'
+      logger.debug(
+        'findReferences',
+        'File was just opened, waiting for server to index project...'
       );
-      // Wait a short time for the server to process the didOpen notification
-      // and start indexing the project. This is especially important for
-      // workspace-wide operations like find_references.
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
 
-    process.stderr.write(
-      `[DEBUG] findReferences for ${filePath} at ${position.line}:${position.character}, includeDeclaration: ${includeDeclaration}\n`
-    );
-
     const method = 'textDocument/references';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -1001,27 +1112,19 @@ export class LSPClient {
       timeout
     );
 
-    process.stderr.write(
-      `[DEBUG] findReferences result type: ${typeof result}, isArray: ${Array.isArray(result)}, length: ${Array.isArray(result) ? result.length : 'N/A'}\n`
-    );
-
-    if (result && Array.isArray(result) && result.length > 0) {
-      process.stderr.write(`[DEBUG] First reference: ${JSON.stringify(result[0], null, 2)}\n`);
-    } else if (result === null || result === undefined) {
-      process.stderr.write('[DEBUG] findReferences returned null/undefined\n');
-    } else {
-      process.stderr.write(
-        `[DEBUG] findReferences returned unexpected result: ${JSON.stringify(result)}\n`
-      );
-    }
-
     if (Array.isArray(result)) {
-      return result.map((loc: LSPLocation) => ({
+      const locations = result.map((loc: LSPLocation) => ({
         uri: loc.uri,
         range: loc.range,
       }));
+      logger.info(
+        'findReferences',
+        `completed in ${Date.now() - startTime}ms, returned ${locations.length} reference(s)`
+      );
+      return locations;
     }
 
+    logger.info('findReferences', `completed in ${Date.now() - startTime}ms, no references found`);
     return [];
   }
 
@@ -1083,21 +1186,31 @@ export class LSPClient {
   ): Promise<{
     changes?: Record<string, Array<{ range: { start: Position; end: Position }; newText: string }>>;
   }> {
-    process.stderr.write(
-      `[DEBUG renameSymbol] Requesting rename for ${filePath} at ${position.line}:${position.character} to "${newName}"\n`
+    const renameStart = Date.now();
+    logger.info(
+      'renameSymbol',
+      `Requesting rename for ${filePath} at ${position.line}:${position.character} to "${newName}"`
     );
 
     const serverState = await this.getServer(filePath);
+    logger.debug(
+      'renameSymbol',
+      `Server acquired in ${Date.now() - renameStart}ms (adapter=${serverState.adapter?.name ?? 'none'}, dead=${serverState.dead ?? false})`
+    );
 
     // Wait for the server to be fully initialized
     await serverState.initializationPromise;
+    logger.debug('renameSymbol', `Server initialized, elapsed ${Date.now() - renameStart}ms`);
 
     // Ensure the file is opened and synced with the LSP server
     await this.ensureFileOpen(serverState, filePath);
 
-    process.stderr.write('[DEBUG renameSymbol] Sending textDocument/rename request\n');
     const method = 'textDocument/rename';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
+    logger.info('renameSymbol', `Sending textDocument/rename (timeout=${timeout}ms)`);
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -1112,13 +1225,17 @@ export class LSPClient {
     const changes = this.normalizeWorkspaceEdit(result);
     if (changes) {
       const changeCount = Object.keys(changes).length;
-      process.stderr.write(
-        `[DEBUG renameSymbol] WorkspaceEdit has changes for ${changeCount} files\n`
+      logger.info(
+        'renameSymbol',
+        `WorkspaceEdit has changes for ${changeCount} files (total elapsed ${Date.now() - renameStart}ms)`
       );
       return { changes };
     }
 
-    process.stderr.write('[DEBUG renameSymbol] No rename changes available\n');
+    logger.warn(
+      'renameSymbol',
+      `No rename changes available (total elapsed ${Date.now() - renameStart}ms)`
+    );
     return {};
   }
 
@@ -1134,8 +1251,10 @@ export class LSPClient {
     > | null;
     warnings: string[];
   }> {
-    process.stderr.write(
-      `[DEBUG moveFile] ${dryRun ? '[DRY RUN] ' : ''}Moving ${sourcePath} -> ${destinationPath}\n`
+    const startTime = Date.now();
+    logger.info(
+      'moveFile',
+      `${dryRun ? '[DRY RUN] ' : ''}Moving ${sourcePath} -> ${destinationPath}`
     );
 
     // Validate source exists and is a file
@@ -1228,9 +1347,7 @@ export class LSPClient {
       if (!editResult.success) {
         throw new Error(`Failed to apply import updates: ${editResult.error}`);
       }
-      process.stderr.write(
-        `[DEBUG moveFile] Applied import edits to ${editResult.filesModified.length} file(s)\n`
-      );
+      logger.info('moveFile', `Applied import edits to ${editResult.filesModified.length} file(s)`);
     }
 
     // Create destination directory if needed
@@ -1241,7 +1358,7 @@ export class LSPClient {
 
     // Move the file
     renameSync(sourcePath, destinationPath);
-    process.stderr.write('[DEBUG moveFile] File moved on disk\n');
+    logger.info('moveFile', `File moved on disk, elapsed ${Date.now() - startTime}ms`);
 
     // Update LSP state: close old file, open new file
     for (const serverState of this.servers.values()) {
@@ -1284,6 +1401,9 @@ export class LSPClient {
   }
 
   async getDocumentSymbols(filePath: string): Promise<DocumentSymbol[] | SymbolInformation[]> {
+    const startTime = Date.now();
+    logger.info('getDocumentSymbols', `${filePath}`);
+
     const serverState = await this.getServer(filePath);
 
     // Wait for the server to be fully initialized
@@ -1296,17 +1416,21 @@ export class LSPClient {
     const currentVersion = serverState.fileVersions.get(filePath) ?? 0;
     const cached = serverState.symbolCache.get(filePath);
     if (cached && cached.version === currentVersion) {
-      process.stderr.write(
-        `[DEBUG] Returning cached documentSymbols for ${filePath} (version ${currentVersion}, ${cached.symbols.length} symbols)\n`
+      logger.debug(
+        'getDocumentSymbols',
+        `Returning cached symbols for ${filePath} (version ${currentVersion}, ${cached.symbols.length} symbols)`
       );
       return cached.symbols;
     }
 
-    process.stderr.write(`[DEBUG] Requesting documentSymbol for: ${filePath}\n`);
+    logger.debug('getDocumentSymbols', `Requesting documentSymbol for: ${filePath}`);
 
     // Get custom timeout from adapter if available
     const method = 'textDocument/documentSymbol';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
 
     const result = await this.sendRequest(
       serverState.process,
@@ -1317,27 +1441,18 @@ export class LSPClient {
       timeout
     );
 
-    process.stderr.write(
-      `[DEBUG] documentSymbol result type: ${typeof result}, isArray: ${Array.isArray(result)}, length: ${Array.isArray(result) ? result.length : 'N/A'}\n`
-    );
-
-    if (result && Array.isArray(result) && result.length > 0) {
-      process.stderr.write(`[DEBUG] First symbol: ${JSON.stringify(result[0], null, 2)}\n`);
-    } else if (result === null || result === undefined) {
-      process.stderr.write('[DEBUG] documentSymbol returned null/undefined\n');
-    } else {
-      process.stderr.write(
-        `[DEBUG] documentSymbol returned unexpected result: ${JSON.stringify(result)}\n`
-      );
-    }
-
     if (Array.isArray(result)) {
       const symbols = result as DocumentSymbol[] | SymbolInformation[];
       // Cache the result with current file version
       serverState.symbolCache.set(filePath, { version: currentVersion, symbols });
+      logger.info(
+        'getDocumentSymbols',
+        `completed in ${Date.now() - startTime}ms, returned ${symbols.length} symbol(s)`
+      );
       return symbols;
     }
 
+    logger.info('getDocumentSymbols', `completed in ${Date.now() - startTime}ms, no symbols found`);
     return [];
   }
 
@@ -1442,8 +1557,9 @@ export class LSPClient {
       const startLine = range.start.line;
       const endLine = range.end.line;
 
-      process.stderr.write(
-        `[DEBUG findSymbolPositionInFile] Searching for "${symbol.name}" in lines ${startLine}-${endLine}\n`
+      logger.debug(
+        'findSymbolPositionInFile',
+        `Searching for "${symbol.name}" in lines ${startLine}-${endLine}`
       );
 
       // Search within the symbol's range for the symbol name
@@ -1467,8 +1583,9 @@ export class LSPClient {
 
         if (symbolIndex !== -1) {
           const actualCharacter = searchStart + symbolIndex;
-          process.stderr.write(
-            `[DEBUG findSymbolPositionInFile] Found "${symbol.name}" at line ${lineNum}, character ${actualCharacter}\n`
+          logger.debug(
+            'findSymbolPositionInFile',
+            `Found "${symbol.name}" at line ${lineNum}, character ${actualCharacter}`
           );
 
           return {
@@ -1479,14 +1596,13 @@ export class LSPClient {
       }
 
       // Fallback to range start if not found
-      process.stderr.write(
-        `[DEBUG findSymbolPositionInFile] Symbol "${symbol.name}" not found in range, using range start\n`
+      logger.debug(
+        'findSymbolPositionInFile',
+        `Symbol "${symbol.name}" not found in range, using range start`
       );
       return range.start;
     } catch (error) {
-      process.stderr.write(
-        `[DEBUG findSymbolPositionInFile] Error reading file: ${error}, using range start\n`
-      );
+      logger.debug('findSymbolPositionInFile', `Error reading file: ${error}, using range start`);
       return symbol.location.range.start;
     }
   }
@@ -1528,8 +1644,10 @@ export class LSPClient {
     symbolName: string,
     symbolKind?: string
   ): Promise<{ matches: SymbolMatch[]; warning?: string }> {
-    process.stderr.write(
-      `[DEBUG findSymbolsByName] Searching for symbol "${symbolName}" with kind "${symbolKind || 'any'}" in ${filePath}\n`
+    const startTime = Date.now();
+    logger.info(
+      'findSymbolsByName',
+      `Searching for "${symbolName}" (kind=${symbolKind || 'any'}) in ${filePath}`
     );
 
     // Validate symbolKind if provided - return validation info for caller to handle
@@ -1544,19 +1662,13 @@ export class LSPClient {
     const symbols = await this.getDocumentSymbols(filePath);
     const matches: SymbolMatch[] = [];
 
-    process.stderr.write(
-      `[DEBUG findSymbolsByName] Got ${symbols.length} symbols from documentSymbols\n`
-    );
+    logger.debug('findSymbolsByName', `Got ${symbols.length} symbols from documentSymbols`);
 
     if (this.isDocumentSymbolArray(symbols)) {
-      process.stderr.write(
-        '[DEBUG findSymbolsByName] Processing DocumentSymbol[] (hierarchical format)\n'
-      );
+      logger.debug('findSymbolsByName', 'Processing DocumentSymbol[] (hierarchical format)');
       // Handle DocumentSymbol[] (hierarchical)
       const flatSymbols = this.flattenDocumentSymbols(symbols);
-      process.stderr.write(
-        `[DEBUG findSymbolsByName] Flattened to ${flatSymbols.length} symbols\n`
-      );
+      logger.debug('findSymbolsByName', `Flattened to ${flatSymbols.length} symbols`);
 
       for (const { symbol, containerName } of flatSymbols) {
         const nameMatches = symbol.name === symbolName || symbol.name.includes(symbolName);
@@ -1564,13 +1676,10 @@ export class LSPClient {
           !effectiveSymbolKind ||
           this.symbolKindToString(symbol.kind) === effectiveSymbolKind.toLowerCase();
 
-        process.stderr.write(
-          `[DEBUG findSymbolsByName] Checking DocumentSymbol: ${symbol.name} (${this.symbolKindToString(symbol.kind)}) - nameMatch: ${nameMatches}, kindMatch: ${kindMatches}\n`
-        );
-
         if (nameMatches && kindMatches) {
-          process.stderr.write(
-            `[DEBUG findSymbolsByName] DocumentSymbol match: ${symbol.name} (kind=${symbol.kind}) using selectionRange ${symbol.selectionRange.start.line}:${symbol.selectionRange.start.character}\n`
+          logger.debug(
+            'findSymbolsByName',
+            `DocumentSymbol match: ${symbol.name} (${this.symbolKindToString(symbol.kind)}) at ${symbol.selectionRange.start.line}:${symbol.selectionRange.start.character}`
           );
 
           matches.push({
@@ -1584,9 +1693,7 @@ export class LSPClient {
         }
       }
     } else {
-      process.stderr.write(
-        '[DEBUG findSymbolsByName] Processing SymbolInformation[] (flat format)\n'
-      );
+      logger.debug('findSymbolsByName', 'Processing SymbolInformation[] (flat format)');
       // Handle SymbolInformation[] (flat)
       for (const symbol of symbols) {
         const nameMatches = symbol.name === symbolName || symbol.name.includes(symbolName);
@@ -1594,21 +1701,19 @@ export class LSPClient {
           !effectiveSymbolKind ||
           this.symbolKindToString(symbol.kind) === effectiveSymbolKind.toLowerCase();
 
-        process.stderr.write(
-          `[DEBUG findSymbolsByName] Checking SymbolInformation: ${symbol.name} (${this.symbolKindToString(symbol.kind)}) - nameMatch: ${nameMatches}, kindMatch: ${kindMatches}\n`
-        );
-
         if (nameMatches && kindMatches) {
-          process.stderr.write(
-            `[DEBUG findSymbolsByName] SymbolInformation match: ${symbol.name} (kind=${symbol.kind}) at ${symbol.location.range.start.line}:${symbol.location.range.start.character} to ${symbol.location.range.end.line}:${symbol.location.range.end.character}\n`
+          logger.debug(
+            'findSymbolsByName',
+            `SymbolInformation match: ${symbol.name} (${this.symbolKindToString(symbol.kind)}) at ${symbol.location.range.start.line}:${symbol.location.range.start.character}`
           );
 
           // For SymbolInformation, we need to find the actual symbol name position within the range
           // by reading the file content and searching for the symbol name
           const position = await this.findSymbolPositionInFile(filePath, symbol);
 
-          process.stderr.write(
-            `[DEBUG findSymbolsByName] Found symbol position in file: ${position.line}:${position.character}\n`
+          logger.debug(
+            'findSymbolsByName',
+            `Found symbol position in file: ${position.line}:${position.character}`
           );
 
           matches.push({
@@ -1623,13 +1728,14 @@ export class LSPClient {
       }
     }
 
-    process.stderr.write(`[DEBUG findSymbolsByName] Found ${matches.length} matching symbols\n`);
+    logger.debug('findSymbolsByName', `Found ${matches.length} matching symbols`);
 
     // If a specific symbol kind was requested but no matches found, try searching all kinds as fallback
     let fallbackWarning: string | undefined;
     if (effectiveSymbolKind && matches.length === 0) {
-      process.stderr.write(
-        `[DEBUG findSymbolsByName] No matches found for kind "${effectiveSymbolKind}", trying fallback search for all kinds\n`
+      logger.debug(
+        'findSymbolsByName',
+        `No matches found for kind "${effectiveSymbolKind}", trying fallback search for all kinds`
       );
 
       const fallbackMatches: SymbolMatch[] = [];
@@ -1672,13 +1778,18 @@ export class LSPClient {
         ];
         fallbackWarning = `⚠️ No symbols found with kind "${effectiveSymbolKind}". Found ${fallbackMatches.length} symbol(s) with name "${symbolName}" of other kinds: ${foundKinds.join(', ')}.`;
         matches.push(...fallbackMatches);
-        process.stderr.write(
-          `[DEBUG findSymbolsByName] Fallback search found ${fallbackMatches.length} additional matches\n`
+        logger.debug(
+          'findSymbolsByName',
+          `Fallback search found ${fallbackMatches.length} additional matches`
         );
       }
     }
 
     const combinedWarning = [validationWarning, fallbackWarning].filter(Boolean).join(' ');
+    logger.info(
+      'findSymbolsByName',
+      `completed in ${Date.now() - startTime}ms, found ${matches.length} match(es)`
+    );
     return { matches, warning: combinedWarning || undefined };
   }
 
@@ -1701,9 +1812,7 @@ export class LSPClient {
     let lastVersion = serverState.diagnosticVersions.get(fileUri) ?? -1;
     let lastUpdateTime = serverState.lastDiagnosticUpdate.get(fileUri) ?? startTime;
 
-    process.stderr.write(
-      `[DEBUG waitForDiagnosticsIdle] Waiting for diagnostics to stabilize for ${fileUri}\n`
-    );
+    logger.debug('waitForDiagnosticsIdle', `Waiting for diagnostics to stabilize for ${fileUri}`);
 
     while (Date.now() - startTime < maxWaitTime) {
       await new Promise((resolve) => setTimeout(resolve, checkInterval));
@@ -1713,8 +1822,9 @@ export class LSPClient {
 
       // Check if version changed
       if (currentVersion !== lastVersion) {
-        process.stderr.write(
-          `[DEBUG waitForDiagnosticsIdle] Version changed from ${lastVersion} to ${currentVersion}\n`
+        logger.debug(
+          'waitForDiagnosticsIdle',
+          `Version changed from ${lastVersion} to ${currentVersion}`
         );
         lastVersion = currentVersion;
         lastUpdateTime = currentUpdateTime;
@@ -1724,20 +1834,20 @@ export class LSPClient {
       // Check if enough time has passed without updates
       const timeSinceLastUpdate = Date.now() - currentUpdateTime;
       if (timeSinceLastUpdate >= idleTime) {
-        process.stderr.write(
-          `[DEBUG waitForDiagnosticsIdle] Server appears idle after ${timeSinceLastUpdate}ms without updates\n`
+        logger.debug(
+          'waitForDiagnosticsIdle',
+          `Server appears idle after ${timeSinceLastUpdate}ms without updates`
         );
         return;
       }
     }
 
-    process.stderr.write(
-      `[DEBUG waitForDiagnosticsIdle] Max wait time reached (${maxWaitTime}ms)\n`
-    );
+    logger.debug('waitForDiagnosticsIdle', `Max wait time reached (${maxWaitTime}ms)`);
   }
 
   async getDiagnostics(filePath: string): Promise<Diagnostic[]> {
-    process.stderr.write(`[DEBUG getDiagnostics] Requesting diagnostics for ${filePath}\n`);
+    const startTime = Date.now();
+    logger.info('getDiagnostics', `${filePath}`);
 
     const serverState = await this.getServer(filePath);
 
@@ -1752,50 +1862,51 @@ export class LSPClient {
     const cachedDiagnostics = serverState.diagnostics.get(fileUri);
 
     if (cachedDiagnostics !== undefined) {
-      process.stderr.write(
-        `[DEBUG getDiagnostics] Returning ${cachedDiagnostics.length} cached diagnostics from publishDiagnostics\n`
+      logger.info(
+        'getDiagnostics',
+        `completed in ${Date.now() - startTime}ms, returning ${cachedDiagnostics.length} cached diagnostics`
       );
       return cachedDiagnostics;
     }
 
     // If no cached diagnostics, try the pull-based textDocument/diagnostic
-    process.stderr.write(
-      '[DEBUG getDiagnostics] No cached diagnostics, trying textDocument/diagnostic request\n'
-    );
+    logger.debug('getDiagnostics', 'No cached diagnostics, trying textDocument/diagnostic request');
 
     try {
       const result = await this.sendRequest(serverState.process, 'textDocument/diagnostic', {
         textDocument: { uri: fileUri },
       });
 
-      process.stderr.write(
-        `[DEBUG getDiagnostics] Result type: ${typeof result}, has kind: ${result && typeof result === 'object' && 'kind' in result}\n`
-      );
-
       if (result && typeof result === 'object' && 'kind' in result) {
         const report = result as DocumentDiagnosticReport;
 
         if (report.kind === 'full' && report.items) {
-          process.stderr.write(
-            `[DEBUG getDiagnostics] Full report with ${report.items.length} diagnostics\n`
+          logger.info(
+            'getDiagnostics',
+            `completed in ${Date.now() - startTime}ms, full report with ${report.items.length} diagnostics`
           );
           return report.items;
         }
         if (report.kind === 'unchanged') {
-          process.stderr.write('[DEBUG getDiagnostics] Unchanged report (no new diagnostics)\n');
+          logger.info(
+            'getDiagnostics',
+            `completed in ${Date.now() - startTime}ms, unchanged report`
+          );
           return [];
         }
       }
 
-      process.stderr.write(
-        '[DEBUG getDiagnostics] Unexpected response format, returning empty array\n'
+      logger.info(
+        'getDiagnostics',
+        `completed in ${Date.now() - startTime}ms, unexpected response format`
       );
       return [];
     } catch (error) {
       // Some LSP servers may not support textDocument/diagnostic
       // Try falling back to waiting for publishDiagnostics notifications
-      process.stderr.write(
-        `[DEBUG getDiagnostics] textDocument/diagnostic not supported or failed: ${error}. Waiting for publishDiagnostics...\n`
+      logger.info(
+        'getDiagnostics',
+        `textDocument/diagnostic not supported or failed: ${error}. Waiting for publishDiagnostics...`
       );
 
       // Wait for the server to become idle and publish diagnostics
@@ -1808,15 +1919,17 @@ export class LSPClient {
       // Check again for cached diagnostics
       const diagnosticsAfterWait = serverState.diagnostics.get(fileUri);
       if (diagnosticsAfterWait !== undefined) {
-        process.stderr.write(
-          `[DEBUG getDiagnostics] Returning ${diagnosticsAfterWait.length} diagnostics after waiting for idle state\n`
+        logger.info(
+          'getDiagnostics',
+          `completed in ${Date.now() - startTime}ms, ${diagnosticsAfterWait.length} diagnostics after idle wait`
         );
         return diagnosticsAfterWait;
       }
 
       // If still no diagnostics, try triggering publishDiagnostics by making a no-op change
-      process.stderr.write(
-        '[DEBUG getDiagnostics] No diagnostics yet, triggering publishDiagnostics with no-op change\n'
+      logger.debug(
+        'getDiagnostics',
+        'No diagnostics yet, triggering publishDiagnostics with no-op change'
       );
 
       try {
@@ -1866,15 +1979,14 @@ export class LSPClient {
         // Check one more time
         const diagnosticsAfterTrigger = serverState.diagnostics.get(fileUri);
         if (diagnosticsAfterTrigger !== undefined) {
-          process.stderr.write(
-            `[DEBUG getDiagnostics] Returning ${diagnosticsAfterTrigger.length} diagnostics after triggering publishDiagnostics\n`
+          logger.info(
+            'getDiagnostics',
+            `completed in ${Date.now() - startTime}ms, ${diagnosticsAfterTrigger.length} diagnostics after trigger`
           );
           return diagnosticsAfterTrigger;
         }
       } catch (triggerError) {
-        process.stderr.write(
-          `[DEBUG getDiagnostics] Failed to trigger publishDiagnostics: ${triggerError}\n`
-        );
+        logger.warn('getDiagnostics', `Failed to trigger publishDiagnostics: ${triggerError}`);
       }
 
       return [];
@@ -1888,16 +2000,18 @@ export class LSPClient {
     contents: string | { kind: string; value: string };
     range?: { start: Position; end: Position };
   } | null> {
-    process.stderr.write(
-      `[DEBUG hover] Requesting hover for ${filePath} at ${position.line}:${position.character}\n`
-    );
+    const startTime = Date.now();
+    logger.info('hover', `${filePath} at ${position.line}:${position.character}`);
 
     const serverState = await this.getServer(filePath);
     await serverState.initializationPromise;
     await this.ensureFileOpen(serverState, filePath);
 
     const method = 'textDocument/hover';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -1909,27 +2023,30 @@ export class LSPClient {
     );
 
     if (result && typeof result === 'object' && 'contents' in result) {
+      logger.info('hover', `completed in ${Date.now() - startTime}ms, has content`);
       return result as {
         contents: string | { kind: string; value: string };
         range?: { start: Position; end: Position };
       };
     }
 
+    logger.info('hover', `completed in ${Date.now() - startTime}ms, no hover info`);
     return null;
   }
 
   async workspaceSymbol(query: string): Promise<SymbolInformation[]> {
-    process.stderr.write(`[DEBUG workspaceSymbol] Searching for "${query}"\n`);
+    const startTime = Date.now();
+    logger.info('workspaceSymbol', `Searching for "${query}"`);
 
     // If all servers have died, attempt to re-preload them
     if (this.servers.size === 0 && this.serversStarting.size === 0) {
-      process.stderr.write('[DEBUG workspaceSymbol] No servers running, attempting to preload...\n');
+      logger.warn('workspaceSymbol', 'No servers running, attempting to preload...');
       await this.preloadServers(false);
     }
 
     const servers = Array.from(this.servers.values());
     if (servers.length === 0) {
-      process.stderr.write('[DEBUG workspaceSymbol] No LSP servers running\n');
+      logger.warn('workspaceSymbol', 'No LSP servers running');
       return [];
     }
 
@@ -1952,19 +2069,27 @@ export class LSPClient {
 
       try {
         const method = 'workspace/symbol';
-        const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+        const timeout =
+          serverState.adapter?.getTimeout?.(method) ??
+          DEFAULT_METHOD_TIMEOUTS[method] ??
+          DEFAULT_TIMEOUT;
         const result = await this.sendRequest(serverState.process, method, { query }, timeout);
 
         if (Array.isArray(result)) {
           allSymbols.push(...(result as SymbolInformation[]));
         }
       } catch (error) {
-        process.stderr.write(
-          `[DEBUG workspaceSymbol] Error from server ${serverState.config.command.join(' ')}: ${error}\n`
+        logger.warn(
+          'workspaceSymbol',
+          `Error from server ${serverState.config.command.join(' ')}: ${error}`
         );
       }
     }
 
+    logger.info(
+      'workspaceSymbol',
+      `completed in ${Date.now() - startTime}ms, found ${allSymbols.length} symbol(s)`
+    );
     return allSymbols;
   }
 
@@ -1979,15 +2104,14 @@ export class LSPClient {
 
     const filePath = this.findFirstFile(rootDir, extensions, 3);
     if (!filePath) {
-      process.stderr.write(
-        `[DEBUG ensureAnyFileOpen] No matching file found in ${rootDir} for extensions: ${extensions.join(', ')}\n`
+      logger.debug(
+        'ensureAnyFileOpen',
+        `No matching file found in ${rootDir} for extensions: ${extensions.join(', ')}`
       );
       return false;
     }
 
-    process.stderr.write(
-      `[DEBUG ensureAnyFileOpen] Opening ${filePath} to establish project context\n`
-    );
+    logger.debug('ensureAnyFileOpen', `Opening ${filePath} to establish project context`);
     await this.ensureFileOpen(serverState, filePath);
     return true;
   }
@@ -2022,16 +2146,18 @@ export class LSPClient {
   }
 
   async findImplementation(filePath: string, position: Position): Promise<Location[]> {
-    process.stderr.write(
-      `[DEBUG findImplementation] Requesting implementation for ${filePath} at ${position.line}:${position.character}\n`
-    );
+    const startTime = Date.now();
+    logger.info('findImplementation', `${filePath} at ${position.line}:${position.character}`);
 
     const serverState = await this.getServer(filePath);
     await serverState.initializationPromise;
     await this.ensureFileOpen(serverState, filePath);
 
     const method = 'textDocument/implementation';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -2043,30 +2169,45 @@ export class LSPClient {
     );
 
     if (Array.isArray(result)) {
-      return result.map((loc: LSPLocation) => ({
+      const locations = result.map((loc: LSPLocation) => ({
         uri: loc.uri,
         range: loc.range,
       }));
+      logger.info(
+        'findImplementation',
+        `completed in ${Date.now() - startTime}ms, returned ${locations.length} location(s)`
+      );
+      return locations;
     }
     if (result && typeof result === 'object' && 'uri' in result) {
       const location = result as LSPLocation;
+      logger.info(
+        'findImplementation',
+        `completed in ${Date.now() - startTime}ms, returned 1 location`
+      );
       return [{ uri: location.uri, range: location.range }];
     }
 
+    logger.info(
+      'findImplementation',
+      `completed in ${Date.now() - startTime}ms, no implementations found`
+    );
     return [];
   }
 
   async prepareCallHierarchy(filePath: string, position: Position): Promise<CallHierarchyItem[]> {
-    process.stderr.write(
-      `[DEBUG prepareCallHierarchy] Requesting call hierarchy for ${filePath} at ${position.line}:${position.character}\n`
-    );
+    const startTime = Date.now();
+    logger.info('prepareCallHierarchy', `${filePath} at ${position.line}:${position.character}`);
 
     const serverState = await this.getServer(filePath);
     await serverState.initializationPromise;
     await this.ensureFileOpen(serverState, filePath);
 
     const method = 'textDocument/prepareCallHierarchy';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
     const result = await this.sendRequest(
       serverState.process,
       method,
@@ -2078,14 +2219,21 @@ export class LSPClient {
     );
 
     if (Array.isArray(result)) {
-      return result as CallHierarchyItem[];
+      const items = result as CallHierarchyItem[];
+      logger.info(
+        'prepareCallHierarchy',
+        `completed in ${Date.now() - startTime}ms, returned ${items.length} item(s)`
+      );
+      return items;
     }
 
+    logger.info('prepareCallHierarchy', `completed in ${Date.now() - startTime}ms, no items found`);
     return [];
   }
 
   async incomingCalls(item: CallHierarchyItem): Promise<CallHierarchyIncomingCall[]> {
-    process.stderr.write(`[DEBUG incomingCalls] Requesting incoming calls for ${item.name}\n`);
+    const startTime = Date.now();
+    logger.info('incomingCalls', `Requesting for ${item.name}`);
 
     // Extract file path from item URI
     const filePath = uriToPath(item.uri);
@@ -2093,18 +2241,28 @@ export class LSPClient {
     await serverState.initializationPromise;
 
     const method = 'callHierarchy/incomingCalls';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
     const result = await this.sendRequest(serverState.process, method, { item }, timeout);
 
     if (Array.isArray(result)) {
-      return result as CallHierarchyIncomingCall[];
+      const calls = result as CallHierarchyIncomingCall[];
+      logger.info(
+        'incomingCalls',
+        `completed in ${Date.now() - startTime}ms, returned ${calls.length} call(s)`
+      );
+      return calls;
     }
 
+    logger.info('incomingCalls', `completed in ${Date.now() - startTime}ms, no calls found`);
     return [];
   }
 
   async outgoingCalls(item: CallHierarchyItem): Promise<CallHierarchyOutgoingCall[]> {
-    process.stderr.write(`[DEBUG outgoingCalls] Requesting outgoing calls for ${item.name}\n`);
+    const startTime = Date.now();
+    logger.info('outgoingCalls', `Requesting for ${item.name}`);
 
     // Extract file path from item URI
     const filePath = uriToPath(item.uri);
@@ -2112,19 +2270,31 @@ export class LSPClient {
     await serverState.initializationPromise;
 
     const method = 'callHierarchy/outgoingCalls';
-    const timeout = serverState.adapter?.getTimeout?.(method) ?? DEFAULT_METHOD_TIMEOUTS[method] ?? DEFAULT_TIMEOUT;
+    const timeout =
+      serverState.adapter?.getTimeout?.(method) ??
+      DEFAULT_METHOD_TIMEOUTS[method] ??
+      DEFAULT_TIMEOUT;
     const result = await this.sendRequest(serverState.process, method, { item }, timeout);
 
     if (Array.isArray(result)) {
-      return result as CallHierarchyOutgoingCall[];
+      const calls = result as CallHierarchyOutgoingCall[];
+      logger.info(
+        'outgoingCalls',
+        `completed in ${Date.now() - startTime}ms, returned ${calls.length} call(s)`
+      );
+      return calls;
     }
 
+    logger.info('outgoingCalls', `completed in ${Date.now() - startTime}ms, no calls found`);
     return [];
   }
 
   async preloadServers(debug = true): Promise<void> {
     if (debug) {
-      process.stderr.write('Scanning configured server directories for supported file types\n');
+      logger.info(
+        'preloadServers',
+        'Scanning configured server directories for supported file types'
+      );
     }
 
     const serversToStart = new Set<LSPServerConfig>();
@@ -2134,8 +2304,9 @@ export class LSPClient {
       const serverDir = serverConfig.rootDir || process.cwd();
 
       if (debug) {
-        process.stderr.write(
-          `Scanning ${serverDir} for extensions: ${serverConfig.extensions.join(', ')}\n`
+        logger.debug(
+          'preloadServers',
+          `Scanning ${serverDir} for extensions: ${serverConfig.extensions.join(', ')}`
         );
       }
 
@@ -2152,20 +2323,21 @@ export class LSPClient {
           serversToStart.add(serverConfig);
           if (debug) {
             const matchingExts = serverConfig.extensions.filter((ext) => foundExtensions.has(ext));
-            process.stderr.write(
-              `Found matching extensions in ${serverDir}: ${matchingExts.join(', ')}\n`
+            logger.debug(
+              'preloadServers',
+              `Found matching extensions in ${serverDir}: ${matchingExts.join(', ')}`
             );
           }
         }
       } catch (error) {
         if (debug) {
-          process.stderr.write(`Failed to scan ${serverDir}: ${error}\n`);
+          logger.warn('preloadServers', `Failed to scan ${serverDir}: ${error}`);
         }
       }
     }
 
     if (debug) {
-      process.stderr.write(`Starting ${serversToStart.size} LSP servers...\n`);
+      logger.info('preloadServers', `Starting ${serversToStart.size} LSP servers...`);
     }
 
     const startPromises = Array.from(serversToStart).map(async (serverConfig) => {
@@ -2176,7 +2348,7 @@ export class LSPClient {
           return;
         }
         if (debug) {
-          process.stderr.write(`Preloading LSP server: ${serverConfig.command.join(' ')}\n`);
+          logger.info('preloadServers', `Preloading LSP server: ${serverConfig.command.join(' ')}`);
         }
         // Register in serversStarting to prevent concurrent getServer from spawning a duplicate
         const startPromise = this.startServer(serverConfig);
@@ -2186,8 +2358,9 @@ export class LSPClient {
           this.servers.set(key, serverState);
           this.serversStarting.delete(key);
           if (debug) {
-            process.stderr.write(
-              `Successfully preloaded LSP server for extensions: ${serverConfig.extensions.join(', ')}\n`
+            logger.info(
+              'preloadServers',
+              `Successfully preloaded LSP server for extensions: ${serverConfig.extensions.join(', ')}`
             );
           }
         } catch (error) {
@@ -2195,22 +2368,23 @@ export class LSPClient {
           throw error;
         }
       } catch (error) {
-        process.stderr.write(
-          `Failed to preload LSP server for ${serverConfig.extensions.join(', ')}: ${error}\n`
+        logger.error(
+          'preloadServers',
+          `Failed to preload LSP server for ${serverConfig.extensions.join(', ')}: ${error}`
         );
       }
     });
 
     await Promise.all(startPromises);
     if (debug) {
-      process.stderr.write('LSP server preloading completed\n');
+      logger.info('preloadServers', 'LSP server preloading completed');
     }
   }
 
   dispose(): void {
     const serverCount = this.servers.size;
     if (serverCount > 0) {
-      process.stderr.write(`[LSPClient] Disposing ${serverCount} LSP server(s)...\n`);
+      logger.info('dispose', `Disposing ${serverCount} LSP server(s)...`);
     }
 
     for (const serverState of this.servers.values()) {
@@ -2235,13 +2409,13 @@ export class LSPClient {
           // pending timers, so the SIGKILL setTimeout would never fire.
           serverState.process.kill('SIGKILL');
           if (pid) {
-            process.stderr.write(`[LSPClient] Sent SIGKILL to ${cmd} (PID ${pid})\n`);
+            logger.info('dispose', `Sent SIGKILL to ${cmd} (PID ${pid})`);
           }
         }
       } catch (error) {
         // Log error but continue disposing other servers
         if (pid) {
-          process.stderr.write(`[LSPClient] Error killing ${cmd} (PID ${pid}): ${error}\n`);
+          logger.warn('dispose', `Error killing ${cmd} (PID ${pid}): ${error}`);
         }
       }
     }
