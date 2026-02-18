@@ -1468,11 +1468,16 @@ export class LSPClient {
     // Ensure the file is opened and synced with the LSP server
     await this.ensureFileOpen(serverState, filePath);
 
-    // Brief wait for server indexing — just long enough to catch quick startup indexing.
-    // Callers needing a full wait should use waitForIndexing() explicitly.
+    // Brief wait for server indexing — if it finishes quickly, proceed; otherwise
+    // return empty so callers get a fast "still indexing" response instead of a 45s timeout.
+    // Callers needing a full wait should use waitForIndexing() before calling this.
     if (serverState.progressTokens.size > 0) {
       logger.info('getDocumentSymbols', 'Server is indexing, waiting briefly...');
-      await this.waitForServerReady(serverState, 10000);
+      const ready = await this.waitForServerReady(serverState, 10000);
+      if (!ready) {
+        logger.info('getDocumentSymbols', 'Server still indexing after 10s, returning empty');
+        return [];
+      }
     }
 
     // Check symbol cache - use fileVersions for invalidation
@@ -2130,12 +2135,17 @@ export class LSPClient {
         }
       }
 
-      // Brief wait for server indexing — just long enough to catch quick startup indexing.
-      // Callers needing a full wait should use waitForAllIndexing() explicitly.
+      // Brief wait for server indexing — if it finishes quickly, proceed; otherwise
+      // skip this server so callers get a fast response instead of a 45s timeout.
+      // Callers needing a full wait should use waitForAllIndexing() before calling this.
       if (serverState.progressTokens.size > 0) {
         const cmd = serverState.config.command.join(' ');
         logger.info('workspaceSymbol', `Waiting briefly for ${cmd} to finish indexing...`);
-        await this.waitForServerReady(serverState, 10000);
+        const ready = await this.waitForServerReady(serverState, 10000);
+        if (!ready) {
+          logger.info('workspaceSymbol', `${cmd} still indexing after 10s, skipping`);
+          continue;
+        }
       }
 
       try {
