@@ -329,6 +329,7 @@ describe('LSPClient', () => {
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -392,6 +393,7 @@ describe('LSPClient', () => {
         fileVersions,
         symbolCache: new Map(),
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -464,6 +466,7 @@ describe('LSPClient', () => {
         ]),
         symbolCache: new Map(),
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -516,6 +519,7 @@ describe('LSPClient', () => {
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -635,6 +639,7 @@ describe('LSPClient', () => {
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -698,6 +703,7 @@ describe('LSPClient', () => {
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -1650,6 +1656,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -1697,6 +1704,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -1735,6 +1743,7 @@ describe('LSPClient', () => {
         openFiles: new Set<string>(), // Empty - no files open
         config: { extensions: ['ts'], command: ['test'] },
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -1781,6 +1790,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']), // Has an open file
         config: { extensions: ['ts'], command: ['test'] },
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -1844,6 +1854,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -1905,6 +1916,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 
@@ -1957,6 +1969,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
         progressTokens: new Set(),
+        readyPromise: Promise.resolve(),
         adapter: undefined,
       };
 

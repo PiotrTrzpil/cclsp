@@ -1,8 +1,21 @@
-import { describe, expect, it } from 'bun:test';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
+import type { PathLike } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { PyrightAdapter } from './pyright.js';
+
+// Mock existsSync
+const mockExistsSync = mock(existsSync);
+mock.module('node:fs', () => ({
+  existsSync: mockExistsSync,
+}));
 
 describe('PyrightAdapter', () => {
   const adapter = new PyrightAdapter();
+
+  afterEach(() => {
+    mockExistsSync.mockRestore();
+  });
 
   describe('matches', () => {
     it('should match pyright command', () => {
@@ -124,6 +137,92 @@ describe('PyrightAdapter', () => {
 
     it('should return undefined for completion', () => {
       expect(adapter.getTimeout('textDocument/completion')).toBeUndefined();
+    });
+  });
+
+  describe('getWorkspaceSettings', () => {
+    const pythonRelPath = process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python';
+
+    it('should detect .venv and return pythonPath', () => {
+      mockExistsSync.mockImplementation((p: PathLike) => {
+        return String(p) === join('/project', '.venv', pythonRelPath);
+      });
+
+      const result = adapter.getWorkspaceSettings({
+        extensions: ['py'],
+        command: ['pyright-langserver', '--stdio'],
+        rootDir: '/project',
+      });
+
+      expect(result).toEqual({
+        python: {
+          pythonPath: join('/project', '.venv', pythonRelPath),
+        },
+      });
+    });
+
+    it('should detect venv as fallback', () => {
+      mockExistsSync.mockImplementation((p: PathLike) => {
+        return String(p) === join('/project', 'venv', pythonRelPath);
+      });
+
+      const result = adapter.getWorkspaceSettings({
+        extensions: ['py'],
+        command: ['pyright-langserver', '--stdio'],
+        rootDir: '/project',
+      });
+
+      expect(result).toEqual({
+        python: {
+          pythonPath: join('/project', 'venv', pythonRelPath),
+        },
+      });
+    });
+
+    it('should prefer .venv over venv', () => {
+      mockExistsSync.mockImplementation(() => true);
+
+      const result = adapter.getWorkspaceSettings({
+        extensions: ['py'],
+        command: ['pyright-langserver', '--stdio'],
+        rootDir: '/project',
+      });
+
+      expect(result).toEqual({
+        python: {
+          pythonPath: join('/project', '.venv', pythonRelPath),
+        },
+      });
+    });
+
+    it('should return undefined when no venv is found', () => {
+      mockExistsSync.mockImplementation(() => false);
+
+      const result = adapter.getWorkspaceSettings({
+        extensions: ['py'],
+        command: ['pyright-langserver', '--stdio'],
+        rootDir: '/project',
+      });
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should use process.cwd() when rootDir is not set', () => {
+      const cwd = process.cwd();
+      mockExistsSync.mockImplementation((p: PathLike) => {
+        return String(p) === join(cwd, '.venv', pythonRelPath);
+      });
+
+      const result = adapter.getWorkspaceSettings({
+        extensions: ['py'],
+        command: ['pyright-langserver', '--stdio'],
+      });
+
+      expect(result).toEqual({
+        python: {
+          pythonPath: join(cwd, '.venv', pythonRelPath),
+        },
+      });
     });
   });
 });

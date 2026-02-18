@@ -17,6 +17,7 @@ export interface ServerState {
   diagnosticVersions: Map<string, number>;
   adapter?: ServerAdapter;
   serverCapabilities?: Record<string, unknown>;
+  readyPromise: Promise<void>; // Resolves when server responds to first real request (readiness probe)
 }
 
 /**
@@ -73,6 +74,13 @@ export interface ServerAdapter {
    * This is called when isMethodSupported returns false.
    */
   provideFallback?(method: string, params: unknown, state: ServerState): Promise<unknown>;
+
+  /**
+   * Provide settings for workspace/didChangeConfiguration notification.
+   * Called during server initialization to send server-specific workspace settings.
+   * Return undefined to use the default empty settings.
+   */
+  getWorkspaceSettings?(config: LSPServerConfig): Record<string, unknown> | undefined;
 }
 
 /**

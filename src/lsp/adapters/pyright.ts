@@ -1,11 +1,18 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { logger } from '../../logger.js';
 import type { LSPServerConfig } from '../../types.js';
 import type { InitializeParams, ServerAdapter } from './types.js';
+
+const VENV_DIRS = ['.venv', 'venv'];
+const PYTHON_REL_PATH = process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python';
 
 /**
  * Adapter for Pyright Language Server.
  *
  * Pyright and basedpyright can be slow on large Python projects.
- * This adapter extends timeouts for operations that may take longer.
+ * This adapter extends timeouts for operations that may take longer
+ * and auto-detects virtual environments for correct import resolution.
  */
 export class PyrightAdapter implements ServerAdapter {
   readonly name = 'pyright';
@@ -42,5 +49,32 @@ export class PyrightAdapter implements ServerAdapter {
       'workspace/symbol': 60000, // 60 seconds
     };
     return timeouts[method];
+  }
+
+  getWorkspaceSettings(config: LSPServerConfig): Record<string, unknown> | undefined {
+    const rootDir = config.rootDir || process.cwd();
+    const pythonPath = this.detectVenvPython(rootDir);
+
+    if (!pythonPath) {
+      return undefined;
+    }
+
+    logger.info('PyrightAdapter', `Detected venv python: ${pythonPath}`);
+
+    return {
+      python: {
+        pythonPath,
+      },
+    };
+  }
+
+  private detectVenvPython(rootDir: string): string | undefined {
+    for (const dir of VENV_DIRS) {
+      const candidate = join(rootDir, dir, PYTHON_REL_PATH);
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    return undefined;
   }
 }

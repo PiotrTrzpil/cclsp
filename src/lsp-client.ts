@@ -58,6 +58,7 @@ interface ServerState {
   dead?: boolean; // Set when the server process exits or errors unexpectedly
   progressTokens: Set<string | number>; // Active work-done progress tokens (e.g., indexing)
   indexingWaiters: Array<() => void>; // Callbacks waiting for indexing to complete
+  readyPromise: Promise<void>; // Resolves when server responds to first real request (readiness probe)
 }
 
 /**
@@ -91,6 +92,26 @@ export class LSPClient {
 
   private isPylspServer(serverConfig: LSPServerConfig): boolean {
     return serverConfig.command.some((cmd) => cmd.includes('pylsp'));
+  }
+
+  /**
+   * Walk up from a file path to find the nearest project root.
+   * Looks for common project markers like .git, pyproject.toml, package.json, etc.
+   */
+  private detectProjectRoot(filePath: string): string | undefined {
+    const markers = ['.git', 'pyproject.toml', 'setup.py', 'package.json', 'go.mod', 'Cargo.toml'];
+    let dir = dirname(filePath);
+    const root = dirname(dir) === dir ? dir : '/'; // filesystem root
+
+    while (dir !== root && dir !== dirname(dir)) {
+      for (const marker of markers) {
+        if (existsSync(join(dir, marker))) {
+          return dir;
+        }
+      }
+      dir = dirname(dir);
+    }
+    return undefined;
   }
 
   constructor(configPath?: string) {
@@ -256,6 +277,7 @@ export class LSPClient {
       adapter, // Store adapter for later use
       progressTokens: new Set(),
       indexingWaiters: [],
+      readyPromise: Promise.resolve(),
     };
 
     // Store the resolve function to call when initialized notification is received
@@ -463,6 +485,15 @@ export class LSPClient {
     // Per LSP spec, the server is ready after client sends initialized notification
     await this.sendNotification(childProcess, 'initialized', {});
 
+    // Trigger workspace initialization in servers that require it.
+    // Pyright won't initialize workspace folders until it receives this notification,
+    // even though folders were provided in the initialize request.
+    // See: https://github.com/microsoft/pyright/issues/6874
+    const adapterSettings = serverState.adapter?.getWorkspaceSettings?.(serverConfig);
+    this.sendNotification(childProcess, 'workspace/didChangeConfiguration', {
+      settings: adapterSettings ?? {},
+    });
+
     // Mark server as initialized - no response expected from initialized notification
     serverState.initialized = true;
     if (serverState.initializationResolve) {
@@ -473,7 +504,45 @@ export class LSPClient {
     // Set up auto-restart timer if configured
     this.setupRestartTimer(serverState);
 
+    // Fire background readiness probe — resolves when the server responds to a
+    // real request (handles Pyright which doesn't send $/progress during indexing)
+    serverState.readyPromise = this.probeServerReadiness(serverState);
+
     return serverState;
+  }
+
+  private async probeServerReadiness(serverState: ServerState): Promise<void> {
+    const startTime = Date.now();
+    const cmd = serverState.config.command.join(' ');
+
+    const rootDir = serverState.config.rootDir || process.cwd();
+    const filePath = this.findFirstFile(rootDir, serverState.config.extensions, 3);
+    if (!filePath) {
+      logger.info('probeServerReadiness', `${cmd}: no files found, skipping probe`);
+      return;
+    }
+
+    try {
+      await this.ensureFileOpen(serverState, filePath);
+      const method = 'textDocument/documentSymbol';
+      const timeout =
+        serverState.adapter?.getTimeout?.(method) ??
+        DEFAULT_METHOD_TIMEOUTS[method] ??
+        DEFAULT_TIMEOUT;
+      await this.sendRequest(
+        serverState.process,
+        method,
+        { textDocument: { uri: pathToUri(filePath) } },
+        Math.max(timeout, 120000)
+      );
+      logger.info('probeServerReadiness', `${cmd}: ready after ${Date.now() - startTime}ms`);
+    } catch (error) {
+      logger.warn(
+        'probeServerReadiness',
+        `${cmd}: probe failed after ${Date.now() - startTime}ms: ${error}`
+      );
+      // Resolve anyway — server may still work for other requests
+    }
   }
 
   private handleMessage(message: LSPMessage, serverState?: ServerState) {
@@ -564,6 +633,7 @@ export class LSPClient {
           Array.isArray((message.params as { items: unknown[] }).items)
         ) {
           const items = (message.params as { items: Array<{ section?: string }> }).items;
+          const adapterSettings = serverState.adapter?.getWorkspaceSettings?.(serverState.config);
           result = items.map((item) => {
             // For pylsp, return settings that keep heavy plugins disabled
             // (matches what we send in initializationOptions)
@@ -583,6 +653,10 @@ export class LSPClient {
                   rope_completion: { enabled: false },
                 },
               };
+            }
+            // Return adapter-provided settings for the requested section
+            if (item.section && adapterSettings && item.section in adapterSettings) {
+              return (adapterSettings as Record<string, unknown>)[item.section];
             }
             return {};
           });
@@ -999,9 +1073,19 @@ export class LSPClient {
   private async getServer(filePath: string): Promise<ServerState> {
     logger.debug('getServer', `Getting server for file: ${filePath}`);
 
-    const serverConfig = this.getServerForFile(filePath);
+    let serverConfig = this.getServerForFile(filePath);
     if (!serverConfig) {
       throw new Error(`No LSP server configured for file: ${filePath}`);
+    }
+
+    // When rootDir is not configured, infer it from the file path so that
+    // each project gets its own server instance with the correct workspace root.
+    if (!serverConfig.rootDir) {
+      const detectedRoot = this.detectProjectRoot(filePath);
+      if (detectedRoot) {
+        serverConfig = { ...serverConfig, rootDir: detectedRoot };
+        logger.info('getServer', `Inferred rootDir: ${detectedRoot} for ${filePath}`);
+      }
     }
 
     const cmd = serverConfig.command.join(' ');
@@ -1468,14 +1552,17 @@ export class LSPClient {
     // Ensure the file is opened and synced with the LSP server
     await this.ensureFileOpen(serverState, filePath);
 
-    // Brief wait for server indexing — if it finishes quickly, proceed; otherwise
-    // return empty so callers get a fast "still indexing" response instead of a 45s timeout.
-    // Callers needing a full wait should use waitForIndexing() before calling this.
-    if (serverState.progressTokens.size > 0) {
-      logger.info('getDocumentSymbols', 'Server is indexing, waiting briefly...');
-      const ready = await this.waitForServerReady(serverState, 10000);
-      if (!ready) {
-        logger.info('getDocumentSymbols', 'Server still indexing after 10s, returning empty');
+    // Wait for server readiness — handles both $/progress servers and probe-based
+    // servers like Pyright (which don't send $/progress during indexing).
+    // If the server isn't ready within 10s, return empty so callers get a fast response.
+    {
+      const timeout = new Promise<void>((_, reject) =>
+        setTimeout(() => reject(new Error('ready timeout')), 10000)
+      );
+      try {
+        await Promise.race([serverState.readyPromise, timeout]);
+      } catch {
+        logger.info('getDocumentSymbols', 'Server not ready after 10s, returning empty');
         return [];
       }
     }
@@ -2135,15 +2222,17 @@ export class LSPClient {
         }
       }
 
-      // Brief wait for server indexing — if it finishes quickly, proceed; otherwise
-      // skip this server so callers get a fast response instead of a 45s timeout.
-      // Callers needing a full wait should use waitForAllIndexing() before calling this.
-      if (serverState.progressTokens.size > 0) {
+      // Wait for server readiness — handles both $/progress servers and probe-based
+      // servers like Pyright (which don't send $/progress during indexing).
+      {
         const cmd = serverState.config.command.join(' ');
-        logger.info('workspaceSymbol', `Waiting briefly for ${cmd} to finish indexing...`);
-        const ready = await this.waitForServerReady(serverState, 10000);
-        if (!ready) {
-          logger.info('workspaceSymbol', `${cmd} still indexing after 10s, skipping`);
+        const timeout = new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error('ready timeout')), 10000)
+        );
+        try {
+          await Promise.race([serverState.readyPromise, timeout]);
+        } catch {
+          logger.info('workspaceSymbol', `${cmd} not ready after 10s, skipping`);
           continue;
         }
       }
@@ -2518,9 +2607,7 @@ export class LSPClient {
   async waitForAllIndexing(timeout = 60000): Promise<boolean> {
     const promises: Promise<boolean>[] = [];
     for (const serverState of this.servers.values()) {
-      if (serverState.progressTokens.size > 0) {
-        promises.push(this.waitForServerReady(serverState, timeout));
-      }
+      promises.push(this.waitForServerReady(serverState, timeout));
     }
     if (promises.length === 0) return true;
     const results = await Promise.all(promises);
@@ -2528,11 +2615,18 @@ export class LSPClient {
   }
 
   private waitForServerReady(serverState: ServerState, timeout: number): Promise<boolean> {
+    // readyPromise covers Pyright (probe-based) and any other server
+    const readyRace = Promise.race([
+      serverState.readyPromise.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeout)),
+    ]);
+
+    // If we also have progress tokens, wait for those too
     if (serverState.progressTokens.size === 0) {
-      return Promise.resolve(true);
+      return readyRace;
     }
 
-    return new Promise<boolean>((resolve) => {
+    const progressWait = new Promise<boolean>((resolve) => {
       const waiter = () => {
         clearTimeout(timeoutId);
         resolve(true);
@@ -2546,6 +2640,11 @@ export class LSPClient {
 
       serverState.indexingWaiters.push(waiter);
     });
+
+    // Both must complete: readyPromise AND progress tokens
+    return Promise.all([readyRace, progressWait]).then(
+      ([readyResult, progressResult]) => readyResult && progressResult
+    );
   }
 
   dispose(): void {
