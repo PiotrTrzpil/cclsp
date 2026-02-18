@@ -1468,10 +1468,11 @@ export class LSPClient {
     // Ensure the file is opened and synced with the LSP server
     await this.ensureFileOpen(serverState, filePath);
 
-    // Wait for server to finish indexing before requesting symbols
+    // Brief wait for server indexing — just long enough to catch quick startup indexing.
+    // Callers needing a full wait should use waitForIndexing() explicitly.
     if (serverState.progressTokens.size > 0) {
-      logger.info('getDocumentSymbols', 'Server is indexing, waiting for completion...');
-      await this.waitForServerReady(serverState, 120000);
+      logger.info('getDocumentSymbols', 'Server is indexing, waiting briefly...');
+      await this.waitForServerReady(serverState, 10000);
     }
 
     // Check symbol cache - use fileVersions for invalidation
@@ -2129,11 +2130,12 @@ export class LSPClient {
         }
       }
 
-      // Wait for server to finish indexing before querying workspace symbols
+      // Brief wait for server indexing — just long enough to catch quick startup indexing.
+      // Callers needing a full wait should use waitForAllIndexing() explicitly.
       if (serverState.progressTokens.size > 0) {
         const cmd = serverState.config.command.join(' ');
-        logger.info('workspaceSymbol', `Waiting for ${cmd} to finish indexing...`);
-        await this.waitForServerReady(serverState, 120000);
+        logger.info('workspaceSymbol', `Waiting briefly for ${cmd} to finish indexing...`);
+        await this.waitForServerReady(serverState, 10000);
       }
 
       try {
