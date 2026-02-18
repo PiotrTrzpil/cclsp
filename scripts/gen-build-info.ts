@@ -30,4 +30,6 @@ export const BUILD_INFO = {
 `;
 
 writeFileSync('src/build-info.ts', content);
-console.error(`[gen-build-info] v${version} ${gitCommit}${gitDirty ? '-dirty' : ''} @ ${buildTimestamp}`);
+console.error(
+  `[gen-build-info] v${version} ${gitCommit}${gitDirty ? '-dirty' : ''} @ ${buildTimestamp}`
+);

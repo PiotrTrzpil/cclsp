@@ -10,13 +10,27 @@ import { logger } from './src/logger.js';
 import { LSPClient } from './src/lsp-client.js';
 import { formatLocationWithContext, uriToPath } from './src/utils.js';
 
+/** Indexing notice appended to results when a file's LSP server has active progress tokens */
+const INDEXING_NOTICE_FILE =
+  'Note: The LSP server is still indexing. Results may be incomplete. Use wait_for_indexing=true to wait for indexing to complete.';
+
+/** Indexing notice for workspace-level operations where multiple servers may be involved */
+const INDEXING_NOTICE_WORKSPACE =
+  'Note: One or more LSP servers are still indexing. Results may be incomplete. Use wait_for_indexing=true to wait for indexing to complete.';
+
+/** Short indexing notice for inline use in "no results" messages */
+const INDEXING_NOTICE_SHORT =
+  'The LSP server is still indexing — try again shortly or use wait_for_indexing=true to wait.';
+
 // Handle subcommands and flags
 const args = process.argv.slice(2);
 if (args.length > 0) {
   const subcommand = args[0];
 
   if (subcommand === '--version' || subcommand === '-v') {
-    console.log(`cclsp ${BUILD_INFO.version} (${BUILD_INFO.gitCommit}) built ${BUILD_INFO.buildTimestamp}`);
+    console.log(
+      `cclsp ${BUILD_INFO.version} (${BUILD_INFO.gitCommit}) built ${BUILD_INFO.buildTimestamp}`
+    );
     process.exit(0);
   } else if (subcommand === 'setup') {
     const { main } = await import('./src/setup.js');
@@ -84,6 +98,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 'Number of lines of context to include before and after the target line (default: 2)',
               default: 2,
             },
+            wait_for_indexing: {
+              type: 'boolean',
+              description:
+                'If true, wait for the LSP server to finish indexing before performing the operation. By default (false), results are returned immediately with a notice if the server is still indexing.',
+              default: false,
+            },
           },
           required: ['file_path', 'symbol_name'],
         },
@@ -123,6 +143,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description:
                 'Number of lines of context to include before and after the target line (default: 2)',
               default: 2,
+            },
+            wait_for_indexing: {
+              type: 'boolean',
+              description:
+                'If true, wait for the LSP server to finish indexing before performing the operation. By default (false), results are returned immediately with a notice if the server is still indexing.',
+              default: false,
             },
           },
           required: ['file_path', 'symbol_name'],
@@ -268,6 +294,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description:
                 'Number of lines of context to include before and after the target line (default: 2)',
               default: 2,
+            },
+            wait_for_indexing: {
+              type: 'boolean',
+              description:
+                'If true, wait for all LSP servers to finish indexing before performing the search. By default (false), results are returned immediately with a notice if servers are still indexing.',
+              default: false,
             },
           },
           required: ['query'],
@@ -417,6 +449,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description:
                 'Optional filter by symbol kind (function, class, variable, method, interface, etc.)',
             },
+            wait_for_indexing: {
+              type: 'boolean',
+              description:
+                'If true, wait for all LSP servers to finish indexing before performing the search. By default (false), results are returned immediately with a notice if servers are still indexing.',
+              default: false,
+            },
           },
           required: ['symbol_name'],
         },
@@ -465,6 +503,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               description: 'The path to the file',
             },
+            wait_for_indexing: {
+              type: 'boolean',
+              description:
+                'If true, wait for the LSP server to finish indexing before performing the operation. By default (false), results are returned immediately with a notice if the server is still indexing.',
+              default: false,
+            },
           },
           required: ['file_path'],
         },
@@ -487,6 +531,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             symbol_kind: {
               type: 'string',
               description: 'The kind of symbol (function, class, variable, method, etc.)',
+            },
+            wait_for_indexing: {
+              type: 'boolean',
+              description:
+                'If true, wait for the LSP server to finish indexing before performing the operation. By default (false), results are returned immediately with a notice if the server is still indexing.',
+              default: false,
             },
           },
           required: ['file_path', 'symbol_name'],
@@ -538,19 +588,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         symbol_kind,
         include_context = false,
         context_lines = 2,
+        wait_for_indexing = false,
       } = args as {
         file_path: string;
         symbol_name: string;
         symbol_kind?: string;
         include_context?: boolean;
         context_lines?: number;
+        wait_for_indexing?: boolean;
       };
       const absolutePath = resolve(file_path);
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
       logger.info(
         'find_definition',
-        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'})`
+        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'}, wait_for_indexing=${wait_for_indexing})`
       );
+
+      if (wait_for_indexing) {
+        const ready = await lspClient.waitForIndexing(absolutePath);
+        if (!ready) {
+          logger.warn('find_definition', 'Timed out waiting for server indexing');
+        }
+      }
 
       const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
       const { matches: symbolMatches, warning } = result;
@@ -625,7 +684,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      const responseText = warning ? `${warning}\n\n${results.join('\n\n')}` : results.join('\n\n');
+      const indexingNotice =
+        !wait_for_indexing && lspClient.isIndexing(absolutePath)
+          ? `\n\n${INDEXING_NOTICE_FILE}`
+          : '';
+      const responseText =
+        (warning ? `${warning}\n\n${results.join('\n\n')}` : results.join('\n\n')) + indexingNotice;
 
       return {
         content: [
@@ -646,6 +710,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         include_declaration = true,
         include_context = false,
         context_lines = 2,
+        wait_for_indexing = false,
       } = args as {
         file_path: string;
         symbol_name: string;
@@ -653,13 +718,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         include_declaration?: boolean;
         include_context?: boolean;
         context_lines?: number;
+        wait_for_indexing?: boolean;
       };
       const absolutePath = resolve(file_path);
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
       logger.info(
         'find_references',
-        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'})`
+        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'}, wait_for_indexing=${wait_for_indexing})`
       );
+
+      if (wait_for_indexing) {
+        const ready = await lspClient.waitForIndexing(absolutePath);
+        if (!ready) {
+          logger.warn('find_references', 'Timed out waiting for server indexing');
+        }
+      }
 
       const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
       const { matches: symbolMatches, warning } = result;
@@ -731,7 +804,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      const responseText = warning ? `${warning}\n\n${results.join('\n\n')}` : results.join('\n\n');
+      const indexingNotice =
+        !wait_for_indexing && lspClient.isIndexing(absolutePath)
+          ? `\n\n${INDEXING_NOTICE_FILE}`
+          : '';
+      const responseText =
+        (warning ? `${warning}\n\n${results.join('\n\n')}` : results.join('\n\n')) + indexingNotice;
 
       return {
         content: [
@@ -1153,23 +1231,40 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         query,
         include_context = false,
         context_lines = 2,
+        wait_for_indexing = false,
       } = args as {
         query: string;
         include_context?: boolean;
         context_lines?: number;
+        wait_for_indexing?: boolean;
       };
       const contextOptions = { linesBefore: context_lines, linesAfter: context_lines };
-      logger.info('find_workspace_symbols', `Starting: "${query}"`);
+      logger.info(
+        'find_workspace_symbols',
+        `Starting: "${query}" (wait_for_indexing=${wait_for_indexing})`
+      );
+
+      if (wait_for_indexing) {
+        const ready = await lspClient.waitForAllIndexing();
+        if (!ready) {
+          logger.warn('find_workspace_symbols', 'Timed out waiting for server indexing');
+        }
+      }
 
       try {
         const symbols = await lspClient.workspaceSymbol(query);
 
         if (symbols.length === 0) {
+          const indexingNotice =
+            !wait_for_indexing && lspClient.isAnyServerIndexing()
+              ? ` ${INDEXING_NOTICE_SHORT}`
+              : '';
+
           return {
             content: [
               {
                 type: 'text',
-                text: `No symbols found matching "${query}"`,
+                text: `No symbols found matching "${query}".${indexingNotice}`,
               },
             ],
           };
@@ -1191,11 +1286,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return `• ${sym.name} (${lspClient.symbolKindToString(sym.kind)}) at ${location}`;
         });
 
+        const indexingNotice =
+          !wait_for_indexing && lspClient.isAnyServerIndexing()
+            ? `\n\n${INDEXING_NOTICE_WORKSPACE}`
+            : '';
+
         return {
           content: [
             {
               type: 'text',
-              text: `Found ${symbols.length} symbol(s) matching "${query}":\n\n${symbolList.join(include_context ? '\n\n' : '\n')}`,
+              text: `Found ${symbols.length} symbol(s) matching "${query}":\n\n${symbolList.join(include_context ? '\n\n' : '\n')}${indexingNotice}`,
             },
           ],
         };
@@ -1518,24 +1618,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === 'find_symbol_anywhere') {
       const toolStart = Date.now();
-      const { symbol_name, symbol_kind } = args as {
+      const {
+        symbol_name,
+        symbol_kind,
+        wait_for_indexing = false,
+      } = args as {
         symbol_name: string;
         symbol_kind?: string;
+        wait_for_indexing?: boolean;
       };
       logger.info(
         'find_symbol_anywhere',
-        `Starting: "${symbol_name}" (kind=${symbol_kind ?? 'any'})`
+        `Starting: "${symbol_name}" (kind=${symbol_kind ?? 'any'}, wait_for_indexing=${wait_for_indexing})`
       );
+
+      if (wait_for_indexing) {
+        const ready = await lspClient.waitForAllIndexing();
+        if (!ready) {
+          logger.warn('find_symbol_anywhere', 'Timed out waiting for server indexing');
+        }
+      }
 
       try {
         const symbols = await lspClient.workspaceSymbol(symbol_name);
 
         if (symbols.length === 0) {
+          const indexingNotice =
+            !wait_for_indexing && lspClient.isAnyServerIndexing()
+              ? ` ${INDEXING_NOTICE_SHORT}`
+              : '';
+
           return {
             content: [
               {
                 type: 'text',
-                text: `No symbols found matching "${symbol_name}" in the workspace. Ensure at least one LSP server is running.`,
+                text: `No symbols found matching "${symbol_name}" in the workspace. Ensure at least one LSP server is running.${indexingNotice}`,
               },
             ],
           };
@@ -1580,11 +1697,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? ` (${filtered.length - exactMatches.length} partial match(es) omitted)`
             : '';
 
+        const indexingNotice =
+          !wait_for_indexing && lspClient.isAnyServerIndexing()
+            ? `\n\n${INDEXING_NOTICE_WORKSPACE}`
+            : '';
+
         return {
           content: [
             {
               type: 'text',
-              text: `Found ${displaySymbols.length} symbol(s) matching "${symbol_name}"${symbol_kind ? ` with kind "${symbol_kind}"` : ''}${qualifier}:\n\n${symbolList.join('\n')}`,
+              text: `Found ${displaySymbols.length} symbol(s) matching "${symbol_name}"${symbol_kind ? ` with kind "${symbol_kind}"` : ''}${qualifier}:\n\n${symbolList.join('\n')}${indexingNotice}`,
             },
           ],
         };
@@ -1675,23 +1797,46 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === 'get_symbols_for_file') {
       const toolStart = Date.now();
-      const { file_path } = args as { file_path: string };
+      const { file_path, wait_for_indexing = false } = args as {
+        file_path: string;
+        wait_for_indexing?: boolean;
+      };
       const absolutePath = resolve(file_path);
-      logger.info('get_symbols_for_file', `Starting: ${file_path}`);
+      logger.info(
+        'get_symbols_for_file',
+        `Starting: ${file_path} (wait_for_indexing=${wait_for_indexing})`
+      );
+
+      if (wait_for_indexing) {
+        const ready = await lspClient.waitForIndexing(absolutePath);
+        if (!ready) {
+          logger.warn('get_symbols_for_file', 'Timed out waiting for server indexing');
+        }
+      }
 
       try {
         const symbols = await lspClient.getDocumentSymbols(absolutePath);
 
         if (symbols.length === 0) {
+          const indexingNotice =
+            !wait_for_indexing && lspClient.isIndexing(absolutePath)
+              ? ` ${INDEXING_NOTICE_SHORT}`
+              : '';
+
           return {
             content: [
               {
                 type: 'text',
-                text: `No symbols found in ${file_path}. The file may be empty or the language server may not support document symbols.`,
+                text: `No symbols found in ${file_path}. The file may be empty or the language server may not support document symbols.${indexingNotice}`,
               },
             ],
           };
         }
+
+        const indexingNotice =
+          !wait_for_indexing && lspClient.isIndexing(absolutePath)
+            ? `\n\n${INDEXING_NOTICE_FILE}`
+            : '';
 
         // Check if DocumentSymbol[] (hierarchical) or SymbolInformation[] (flat)
         const isHierarchical =
@@ -1741,7 +1886,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             content: [
               {
                 type: 'text',
-                text: `Found ${symbols.length} top-level symbol(s) in ${file_path}:\n\n${symbolList.join('\n')}`,
+                text: `Found ${symbols.length} top-level symbol(s) in ${file_path}:\n\n${symbolList.join('\n')}${indexingNotice}`,
               },
             ],
           };
@@ -1765,7 +1910,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [
             {
               type: 'text',
-              text: `Found ${symbols.length} symbol(s) in ${file_path}:\n\n${symbolList.join('\n')}`,
+              text: `Found ${symbols.length} symbol(s) in ${file_path}:\n\n${symbolList.join('\n')}${indexingNotice}`,
             },
           ],
         };
@@ -1783,16 +1928,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === 'get_symbol_info') {
       const toolStart = Date.now();
-      const { file_path, symbol_name, symbol_kind } = args as {
+      const {
+        file_path,
+        symbol_name,
+        symbol_kind,
+        wait_for_indexing = false,
+      } = args as {
         file_path: string;
         symbol_name: string;
         symbol_kind?: string;
+        wait_for_indexing?: boolean;
       };
       const absolutePath = resolve(file_path);
       logger.info(
         'get_symbol_info',
-        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'})`
+        `Starting: "${symbol_name}" in ${file_path} (kind=${symbol_kind ?? 'any'}, wait_for_indexing=${wait_for_indexing})`
       );
+
+      if (wait_for_indexing) {
+        const ready = await lspClient.waitForIndexing(absolutePath);
+        if (!ready) {
+          logger.warn('get_symbol_info', 'Timed out waiting for server indexing');
+        }
+      }
 
       const result = await lspClient.findSymbolsByName(absolutePath, symbol_name, symbol_kind);
       const { matches: symbolMatches, warning } = result;
@@ -1854,9 +2012,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         results.push(sections.join('\n'));
       }
 
-      const responseText = warning
-        ? `${warning}\n\n${results.join('\n\n---\n\n')}`
-        : results.join('\n\n---\n\n');
+      const indexingNotice =
+        !wait_for_indexing && lspClient.isIndexing(absolutePath)
+          ? `\n\n${INDEXING_NOTICE_FILE}`
+          : '';
+      const responseText =
+        (warning ? `${warning}\n\n${results.join('\n\n---\n\n')}` : results.join('\n\n---\n\n')) +
+        indexingNotice;
 
       return {
         content: [

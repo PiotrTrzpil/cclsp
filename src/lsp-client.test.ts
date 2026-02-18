@@ -328,6 +328,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -390,6 +391,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         fileVersions,
         symbolCache: new Map(),
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -461,6 +463,7 @@ describe('LSPClient', () => {
           ['b.ts', 1],
         ]),
         symbolCache: new Map(),
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -512,6 +515,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -630,6 +634,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -692,6 +697,7 @@ describe('LSPClient', () => {
         openFiles: new Set(['test.ts']),
         fileVersions: new Map([['test.ts', 1]]),
         symbolCache: new Map(),
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -1643,6 +1649,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -1661,7 +1668,7 @@ describe('LSPClient', () => {
         mockServerState.process,
         'workspace/symbol',
         { query: 'test' },
-        30000
+        45000
       );
 
       sendRequestSpy.mockRestore();
@@ -1670,12 +1677,14 @@ describe('LSPClient', () => {
     it('should return empty array when no servers running', async () => {
       const client = new LSPClient(TEST_CONFIG_PATH);
 
-      // Mock empty servers map
+      // Mock empty servers map and prevent preloadServers from spawning real servers
       (client as any).servers = new Map();
+      const preloadSpy = spyOn(client, 'preloadServers').mockResolvedValue(undefined as any);
 
       const result = await client.workspaceSymbol('test');
 
       expect(result).toEqual([]);
+      preloadSpy.mockRestore();
     });
 
     it('should return empty array when result is not an array', async () => {
@@ -1687,6 +1696,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -1724,6 +1734,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set<string>(), // Empty - no files open
         config: { extensions: ['ts'], command: ['test'] },
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -1769,6 +1780,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']), // Has an open file
         config: { extensions: ['ts'], command: ['test'] },
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -1831,6 +1843,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -1891,6 +1904,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
+        progressTokens: new Set(),
         adapter: undefined,
       };
 
@@ -1942,6 +1956,7 @@ describe('LSPClient', () => {
         initialized: true,
         openFiles: new Set(['test.ts']),
         config: { extensions: ['ts'], command: ['test'] },
+        progressTokens: new Set(),
         adapter: undefined,
       };
 

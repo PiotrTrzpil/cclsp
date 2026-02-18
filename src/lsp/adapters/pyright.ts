@@ -39,6 +39,7 @@ export class PyrightAdapter implements ServerAdapter {
       'textDocument/references': 60000, // 60 seconds
       'textDocument/rename': 60000, // 60 seconds
       'textDocument/documentSymbol': 45000, // 45 seconds
+      'workspace/symbol': 60000, // 60 seconds
     };
     return timeouts[method];
   }

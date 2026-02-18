@@ -56,6 +56,8 @@ interface ServerState {
   adapter?: import('./lsp/adapters/types.js').ServerAdapter; // Optional adapter for server-specific behavior
   serverCapabilities?: Record<string, unknown>; // Server capabilities from initialize response
   dead?: boolean; // Set when the server process exits or errors unexpectedly
+  progressTokens: Set<string | number>; // Active work-done progress tokens (e.g., indexing)
+  indexingWaiters: Array<() => void>; // Callbacks waiting for indexing to complete
 }
 
 /**
@@ -68,6 +70,7 @@ const DEFAULT_METHOD_TIMEOUTS: Record<string, number> = {
   'textDocument/rename': 45000,
   'textDocument/prepareRename': 45000,
   'workspace/willRenameFiles': 45000,
+  'workspace/symbol': 45000,
 };
 
 const DEFAULT_TIMEOUT = 30000;
@@ -251,6 +254,8 @@ export class LSPClient {
       diagnosticVersions: new Map(),
       symbolCache: new Map(),
       adapter, // Store adapter for later use
+      progressTokens: new Set(),
+      indexingWaiters: [],
     };
 
     // Store the resolve function to call when initialized notification is received
@@ -313,6 +318,10 @@ export class LSPClient {
         clearTimeout(serverState.restartTimer);
         serverState.restartTimer = undefined;
       }
+
+      // Notify indexing waiters so they don't hang forever
+      const waiters = serverState.indexingWaiters.splice(0);
+      for (const waiter of waiters) waiter();
 
       // Remove from servers map so getServer will start a fresh instance
       const key = JSON.stringify(serverConfig);
@@ -394,6 +403,18 @@ export class LSPClient {
             willRename: true,
             didRename: true,
           },
+          symbol: {
+            symbolKind: {
+              valueSet: [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+                24, 25, 26,
+              ],
+            },
+          },
+          configuration: true,
+        },
+        window: {
+          workDoneProgress: true,
         },
       },
       rootUri: pathToUri(serverConfig.rootDir || process.cwd()),
@@ -600,6 +621,41 @@ export class LSPClient {
           serverState.lastDiagnosticUpdate.set(params.uri, Date.now());
           if (params.version !== undefined) {
             serverState.diagnosticVersions.set(params.uri, params.version);
+          }
+        }
+      }
+
+      if (message.method === '$/progress') {
+        const params = message.params as {
+          token: string | number;
+          value: { kind: string; title?: string; message?: string; percentage?: number };
+        };
+        if (params?.value) {
+          if (params.value.kind === 'begin') {
+            serverState.progressTokens.add(params.token);
+            logger.info(
+              'handleMessage',
+              `Progress begin: "${params.value.title || ''}" (token=${params.token})`
+            );
+          } else if (params.value.kind === 'end') {
+            serverState.progressTokens.delete(params.token);
+            logger.info(
+              'handleMessage',
+              `Progress end (token=${params.token}), active: ${serverState.progressTokens.size}`
+            );
+            if (serverState.progressTokens.size === 0 && serverState.indexingWaiters.length > 0) {
+              logger.info(
+                'handleMessage',
+                `All progress tokens completed, notifying ${serverState.indexingWaiters.length} waiter(s)`
+              );
+              const waiters = serverState.indexingWaiters.splice(0);
+              for (const waiter of waiters) waiter();
+            }
+          } else if (params.value.kind === 'report') {
+            logger.debug(
+              'handleMessage',
+              `Progress report (token=${params.token}): ${params.value.message || ''}${params.value.percentage !== undefined ? ` ${params.value.percentage}%` : ''}`
+            );
           }
         }
       }
@@ -1412,6 +1468,12 @@ export class LSPClient {
     // Ensure the file is opened and synced with the LSP server
     await this.ensureFileOpen(serverState, filePath);
 
+    // Wait for server to finish indexing before requesting symbols
+    if (serverState.progressTokens.size > 0) {
+      logger.info('getDocumentSymbols', 'Server is indexing, waiting for completion...');
+      await this.waitForServerReady(serverState, 120000);
+    }
+
     // Check symbol cache - use fileVersions for invalidation
     const currentVersion = serverState.fileVersions.get(filePath) ?? 0;
     const cached = serverState.symbolCache.get(filePath);
@@ -2067,6 +2129,13 @@ export class LSPClient {
         }
       }
 
+      // Wait for server to finish indexing before querying workspace symbols
+      if (serverState.progressTokens.size > 0) {
+        const cmd = serverState.config.command.join(' ');
+        logger.info('workspaceSymbol', `Waiting for ${cmd} to finish indexing...`);
+        await this.waitForServerReady(serverState, 120000);
+      }
+
       try {
         const method = 'workspace/symbol';
         const timeout =
@@ -2379,6 +2448,74 @@ export class LSPClient {
     if (debug) {
       logger.info('preloadServers', 'LSP server preloading completed');
     }
+  }
+
+  /**
+   * Check if a server for the given file has active progress tokens (e.g., indexing).
+   */
+  isIndexing(filePath: string): boolean {
+    const serverConfig = this.getServerForFile(filePath);
+    if (!serverConfig) return false;
+    const key = JSON.stringify(serverConfig);
+    const serverState = this.servers.get(key);
+    if (!serverState) return false;
+    return serverState.progressTokens.size > 0;
+  }
+
+  /**
+   * Check if any running server has active progress tokens.
+   */
+  isAnyServerIndexing(): boolean {
+    for (const serverState of this.servers.values()) {
+      if (serverState.progressTokens.size > 0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Wait for the server handling a file to finish all active progress (e.g., indexing).
+   * @returns true if completed, false if timed out
+   */
+  async waitForIndexing(filePath: string, timeout = 60000): Promise<boolean> {
+    const serverState = await this.getServer(filePath);
+    return this.waitForServerReady(serverState, timeout);
+  }
+
+  /**
+   * Wait for all running servers to finish active progress.
+   * @returns true if all completed, false if any timed out
+   */
+  async waitForAllIndexing(timeout = 60000): Promise<boolean> {
+    const promises: Promise<boolean>[] = [];
+    for (const serverState of this.servers.values()) {
+      if (serverState.progressTokens.size > 0) {
+        promises.push(this.waitForServerReady(serverState, timeout));
+      }
+    }
+    if (promises.length === 0) return true;
+    const results = await Promise.all(promises);
+    return results.every(Boolean);
+  }
+
+  private waitForServerReady(serverState: ServerState, timeout: number): Promise<boolean> {
+    if (serverState.progressTokens.size === 0) {
+      return Promise.resolve(true);
+    }
+
+    return new Promise<boolean>((resolve) => {
+      const waiter = () => {
+        clearTimeout(timeoutId);
+        resolve(true);
+      };
+
+      const timeoutId = setTimeout(() => {
+        const idx = serverState.indexingWaiters.indexOf(waiter);
+        if (idx >= 0) serverState.indexingWaiters.splice(idx, 1);
+        resolve(false);
+      }, timeout);
+
+      serverState.indexingWaiters.push(waiter);
+    });
   }
 
   dispose(): void {
