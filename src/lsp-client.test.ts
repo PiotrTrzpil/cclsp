@@ -986,13 +986,121 @@ describe('LSPClient', () => {
         mockSymbols
       );
 
-      // Search for non-existent symbol
+      // Search for non-existent symbol (file doesn't exist either, so text fallback fails silently)
       const result = await client.findSymbolsByName('test.ts', 'nonExistentSymbol', 'function');
 
       expect(result.matches).toHaveLength(0);
       expect(result.warning).toBeUndefined(); // No fallback triggered since no name matches found
 
       getDocumentSymbolsSpy.mockRestore();
+    });
+
+    it('should use text-based fallback when symbol is not in document symbols', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      // Create a file that contains the symbol as a usage (not a definition)
+      const testFilePath = join(TEST_DIR, 'app.ts');
+      writeFileSync(
+        testFilePath,
+        'import { CalendarService } from "./services";\nconst svc = new CalendarService();\n'
+      );
+
+      // Mock getDocumentSymbols to return symbols that do NOT include CalendarService
+      const mockSymbols = [
+        {
+          name: 'svc',
+          kind: 13, // Variable
+          range: { start: { line: 1, character: 0 }, end: { line: 1, character: 38 } },
+          selectionRange: { start: { line: 1, character: 6 }, end: { line: 1, character: 9 } },
+        },
+      ];
+
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockResolvedValue(
+        mockSymbols
+      );
+
+      const result = await client.findSymbolsByName(testFilePath, 'CalendarService');
+
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0]?.name).toBe('CalendarService');
+      expect(result.matches[0]?.isTextFallback).toBe(true);
+      expect(result.matches[0]?.kind).toBeUndefined();
+      expect(result.matches[0]?.range).toBeUndefined();
+      expect(result.matches[0]?.position.line).toBe(0);
+      expect(result.matches[0]?.position.character).toBe(9); // position of 'CalendarService' in import
+      expect(result.warning).toContain('text-based position matching');
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+
+    it('should respect word boundaries in text-based fallback', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const testFilePath = join(TEST_DIR, 'boundaries.ts');
+      writeFileSync(
+        testFilePath,
+        'const CalendarServiceError = new Error();\nconst MyCalendarService = null;\n'
+      );
+
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockResolvedValue([]);
+
+      // Search for 'CalendarService' — should NOT match 'CalendarServiceError' or 'MyCalendarService'
+      const result = await client.findSymbolsByName(testFilePath, 'CalendarService');
+
+      expect(result.matches).toHaveLength(0);
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+
+    it('should not use text fallback when document symbols already match', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const testFilePath = join(TEST_DIR, 'defined.ts');
+      writeFileSync(testFilePath, 'export class CalendarService {}\n');
+
+      const mockSymbols = [
+        {
+          name: 'CalendarService',
+          kind: 5, // Class
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 31 } },
+          selectionRange: { start: { line: 0, character: 13 }, end: { line: 0, character: 28 } },
+        },
+      ];
+
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockResolvedValue(
+        mockSymbols
+      );
+
+      const result = await client.findSymbolsByName(testFilePath, 'CalendarService');
+
+      expect(result.matches).toHaveLength(1);
+      expect(result.matches[0]?.isTextFallback).toBeUndefined(); // Not a text fallback
+      expect(result.matches[0]?.kind).toBe(5); // Class
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+
+    it('should return empty when symbol not in document symbols or file content', async () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+
+      const testFilePath = join(TEST_DIR, 'empty.ts');
+      writeFileSync(testFilePath, 'const x = 1;\n');
+
+      const getDocumentSymbolsSpy = spyOn(client, 'getDocumentSymbols').mockResolvedValue([]);
+
+      const result = await client.findSymbolsByName(testFilePath, 'NonExistentSymbol');
+
+      expect(result.matches).toHaveLength(0);
+      expect(result.warning).toBeUndefined();
+
+      getDocumentSymbolsSpy.mockRestore();
+    });
+  });
+
+  describe('symbolKindToString', () => {
+    it('should return "unknown" for undefined kind', () => {
+      const client = new LSPClient(TEST_CONFIG_PATH);
+      expect(client.symbolKindToString(undefined)).toBe('unknown');
     });
   });
 

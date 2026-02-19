@@ -1637,7 +1637,8 @@ export class LSPClient {
     return 'range' in firstSymbol && 'selectionRange' in firstSymbol;
   }
 
-  symbolKindToString(kind: SymbolKind): string {
+  symbolKindToString(kind: SymbolKind | undefined): string {
+    if (kind === undefined) return 'unknown';
     const kindMap: Record<SymbolKind, string> = {
       [SymbolKind.File]: 'file',
       [SymbolKind.Module]: 'module',
@@ -1759,6 +1760,38 @@ export class LSPClient {
     } catch (error) {
       logger.debug('findSymbolPositionInFile', `Error reading file: ${error}, using range start`);
       return symbol.location.range.start;
+    }
+  }
+
+  private findSymbolByTextSearch(filePath: string, symbolName: string): SymbolMatch[] {
+    try {
+      const fileContent = readFileSync(filePath, 'utf-8');
+      const lines = fileContent.split('\n');
+      const escapedName = symbolName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`\\b${escapedName}\\b`);
+      const matches: SymbolMatch[] = [];
+
+      for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+        const line = lines[lineNum];
+        if (!line) continue;
+        const match = regex.exec(line);
+        if (match) {
+          matches.push({
+            name: symbolName,
+            position: { line: lineNum, character: match.index },
+            isTextFallback: true,
+          });
+        }
+      }
+
+      logger.debug(
+        'findSymbolByTextSearch',
+        `Found ${matches.length} text occurrence(s) of "${symbolName}" in ${filePath}`
+      );
+      return matches;
+    } catch (error) {
+      logger.debug('findSymbolByTextSearch', `Error reading file ${filePath}: ${error}`);
+      return [];
     }
   }
 
@@ -1940,7 +1973,25 @@ export class LSPClient {
       }
     }
 
-    const combinedWarning = [validationWarning, fallbackWarning].filter(Boolean).join(' ');
+    // Text-based fallback: if no matches from document symbols, search file content
+    let textFallbackWarning: string | undefined;
+    if (matches.length === 0) {
+      const textMatches = this.findSymbolByTextSearch(filePath, symbolName);
+      const firstTextMatch = textMatches[0];
+      if (firstTextMatch) {
+        matches.push(firstTextMatch);
+        textFallbackWarning =
+          'Symbol was not found in document symbols (may be imported). Using text-based position matching.';
+        logger.debug(
+          'findSymbolsByName',
+          `Text fallback found "${symbolName}" at ${firstTextMatch.position.line}:${firstTextMatch.position.character}`
+        );
+      }
+    }
+
+    const combinedWarning = [validationWarning, fallbackWarning, textFallbackWarning]
+      .filter(Boolean)
+      .join(' ');
     logger.info(
       'findSymbolsByName',
       `completed in ${Date.now() - startTime}ms, found ${matches.length} match(es)`

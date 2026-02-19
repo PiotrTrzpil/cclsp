@@ -118,14 +118,15 @@ export interface SymbolInformation {
 
 export interface SymbolMatch {
   name: string;
-  kind: SymbolKind;
+  kind?: SymbolKind; // undefined for text-based fallback matches
   position: Position;
-  range: {
+  range?: {
     start: Position;
     end: Position;
-  };
+  }; // undefined for text-based fallback matches
   detail?: string;
   containerName?: string;
+  isTextFallback?: boolean; // true when found via text search instead of document symbols
 }
 
 export enum DiagnosticSeverity {
